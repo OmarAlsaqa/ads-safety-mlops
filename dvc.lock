@@ -3,31 +3,46 @@ stages:
   preprocess:
     cmd: python src/preprocess.py
     deps:
-    - path: data/raw/iaq_classification.csv
+    - path: data/raw/train_sample.csv
       hash: md5
-      md5: 946f678ad750dc895ac14aa8f3b39548
-      size: 18942940
+      md5: 3e9a02d5aca1a825a70b01c7090ea03d
+      size: 4076438
       isexec: true
     - path: src/preprocess.py
       hash: md5
-      md5: 3fd2e3c4c7dc90fdd621566d81c2ffb6
-      size: 3123
+      md5: 6ff06f0a0b681d17cba1e2b24f3ba361
+      size: 6413
       isexec: true
     - path: src/schema.py
       hash: md5
-      md5: 4b6eaaadb643061b967dc67aeb248682
-      size: 3327
+      md5: 369180dceaecb2362b48719d0c177058
+      size: 2107
       isexec: true
     outs:
-    - path: data/processed
+    - path: data/processed/ad_click_graph.pt
       hash: md5
-      md5: eab4b731b215a03c338e02439cb13f0d.dir
-      size: 4205467
-      nfiles: 3
+      md5: 7331398f6b26aaa05f60d5c3620a2920
+      size: 7631465
+      isexec: true
+    - path: data/processed/test.parquet
+      hash: md5
+      md5: 3fabfc8156f9284412ad962a8cb29173
+      size: 256486
+      isexec: true
+    - path: data/processed/train.parquet
+      hash: md5
+      md5: 30211aa4c0c77a1d9021420ef00de041
+      size: 1095430
+      isexec: true
+    - path: data/processed/val.parquet
+      hash: md5
+      md5: 1afce79bcbd6617dc44f708b64011caa
+      size: 257744
+      isexec: true
     - path: data/simulated_production/production_drift_stream.csv
       hash: md5
-      md5: 706db71a3edf941b0aae05fcb6f62921
-      size: 4042236
+      md5: 80e1d04c5f8d8bebe4486d75578f2f84
+      size: 1151675
       isexec: true
   train:
     cmd: python src/train.py
