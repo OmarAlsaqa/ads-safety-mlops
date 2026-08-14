@@ -47,26 +47,41 @@ stages:
   train:
     cmd: python src/train.py
     deps:
-    - path: data/processed/train.parquet
+    - path: data/processed/ad_click_graph.pt
       hash: md5
-      md5: d8bf36557e4435f1eae37552a28a0995
-      size: 2898268
+      md5: 7331398f6b26aaa05f60d5c3620a2920
+      size: 7631465
       isexec: true
-    - path: data/processed/val.parquet
+    - path: src/models/graph_nc.py
       hash: md5
-      md5: a887c8625c1cfb9545b58f7bc977cff4
-      size: 692101
+      md5: ad7c480e225b9d4aa061866e1478a9bb
+      size: 6826
+      isexec: true
+    - path: src/models/layers.py
+      hash: md5
+      md5: cc8d4a0f2f06e22cecdec14a97c1883c
+      size: 2798
+      isexec: true
+    - path: src/models/losses.py
+      hash: md5
+      md5: 232781c7910db8027ec90bf1c145d2a5
+      size: 3252
       isexec: true
     - path: src/train.py
       hash: md5
-      md5: 8a1b2d327e6236ce5e63bdf323baa7af
-      size: 4117
+      md5: bcb9f16e0cfad913b41b68988d9bc0f2
+      size: 13724
       isexec: true
     outs:
-    - path: models/model.pkl
+    - path: models/graph_nc.pt
       hash: md5
-      md5: d2cbdbe9ad566a8dc996086824b5e626
-      size: 1920293
+      md5: 58babdb89a67ac172d9baf99202e3692
+      size: 88575
+      isexec: true
+    - path: models/training_metrics.json
+      hash: md5
+      md5: 923e009e98caa6e4aaa19383b2ac80ed
+      size: 285
       isexec: true
   evaluate_drift:
     cmd: python src/evaluate_drift.py

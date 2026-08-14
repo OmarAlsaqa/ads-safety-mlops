@@ -12,14 +12,17 @@ stages:
       - data/processed/ad_click_graph.pt
       - data/simulated_production/production_drift_stream.csv
 
-  # Future stages (uncommented in Step 2: Training & Step 5: Drift Evaluation)
-  # train:
-  #   cmd: python src/train.py
-  #   deps:
-  #     - src/train.py
-  #     - data/processed/ad_click_graph.pt
-  #   outs:
-  #     - models/graph_nc.pt
+  train:
+    cmd: python src/train.py
+    deps:
+      - src/train.py
+      - src/models/graph_nc.py
+      - src/models/layers.py
+      - src/models/losses.py
+      - data/processed/ad_click_graph.pt
+    outs:
+      - models/graph_nc.pt
+      - models/training_metrics.json
   #
   # evaluate_drift:
   #   cmd: python src/evaluate_drift.py

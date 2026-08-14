@@ -1,4 +1,4 @@
-name: mlops-air-quality
+name: ads-safety-mlops
 
 # ==============================================================================
 # Networks
@@ -26,7 +26,7 @@ services:
   # ----------------------------------------------------------------------------
   dashboard-init:
     image: python:3.11-alpine
-    container_name: local_dashboard_init
+    container_name: ads_dashboard_init
     volumes:
       - provisioned_dashboards:/dashboards
     entrypoint: ["python3", "-c"]
@@ -124,7 +124,7 @@ services:
   # ----------------------------------------------------------------------------
   nginx:
     image: nginx:1.27.4-alpine
-    container_name: local_nginx
+    container_name: ads_nginx
     ports:
       - "80:80"
     volumes:
@@ -154,7 +154,7 @@ services:
   # ----------------------------------------------------------------------------
   floci:
     image: floci/floci:1.6.0
-    container_name: local_aws_floci
+    container_name: ads_floci
     ports:
       - "4566:4566"
     environment:
@@ -183,7 +183,7 @@ services:
   # ----------------------------------------------------------------------------
   floci-ui:
     image: floci/floci-ui:0.2.0
-    container_name: local_floci_ui
+    container_name: ads_floci_ui
     ports:
       - "8080:8080"
     environment:
@@ -211,7 +211,7 @@ services:
   # ----------------------------------------------------------------------------
   docker-metrics:
     image: telegraf:1.34.0-alpine
-    container_name: local_docker_metrics
+    container_name: ads_docker_metrics
     user: root
     entrypoint:
       - /bin/sh
@@ -253,7 +253,7 @@ services:
   # ----------------------------------------------------------------------------
   node-exporter:
     image: prom/node-exporter:v1.9.0
-    container_name: local_node_exporter
+    container_name: ads_node_exporter
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -280,7 +280,7 @@ services:
   # ----------------------------------------------------------------------------
   prometheus:
     image: prom/prometheus:v3.2.1
-    container_name: local_prometheus
+    container_name: ads_prometheus
     ports:
       - "9090:9090"
     command:
@@ -307,7 +307,9 @@ services:
   # ----------------------------------------------------------------------------
   grafana:
     image: grafana/grafana:13.1.3
-    container_name: local_grafana
+    container_name: ads_grafana
+    ports:
+      - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
@@ -339,7 +341,7 @@ services:
   # ----------------------------------------------------------------------------
   mlflow:
     image: ghcr.io/mlflow/mlflow:v3.15.1
-    container_name: local_mlflow
+    container_name: ads_mlflow
     ports:
       - "5000:5000"
     environment:
@@ -384,7 +386,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    container_name: local_model_api
+    container_name: ads_model_api
     ports:
       - "8000:8000"
     environment:
@@ -421,7 +423,7 @@ services:
       context: .
       dockerfile: Dockerfile.evidently
     image: evidently/evidently-service:0.7.21-s3
-    container_name: local_evidently_ui
+    container_name: ads_evidently_ui
     depends_on:
       floci:
         condition: service_healthy
