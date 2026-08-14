@@ -1,0 +1,447 @@
+name: mlops-air-quality
+
+# ==============================================================================
+# Networks
+# ==============================================================================
+networks:
+  mlops-net:
+    driver: bridge
+
+# ==============================================================================
+# Persistent Storage Volumes
+# ==============================================================================
+volumes:
+  floci_data:
+  grafana_data:
+  prometheus_data:
+  provisioned_dashboards:
+  mlflow_data:
+
+# ==============================================================================
+# Services Definition
+# ==============================================================================
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Dashboard Downloader (Python-powered to avoid Docker Compose variable syntax traps)
+  # ----------------------------------------------------------------------------
+  dashboard-init:
+    image: python:3.11-alpine
+    container_name: local_dashboard_init
+    volumes:
+      - provisioned_dashboards:/dashboards
+    entrypoint: ["python3", "-c"]
+    command:
+      - |
+        import urllib.request, re, os
+
+        url = "https://grafana.com/api/dashboards/25012/revisions/1/download"
+        print(f"Downloading dashboard 25012 from {url}...")
+
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp:
+            content = resp.read().decode('utf-8')
+
+        # Clear __inputs array, replace datasource, and aggregate container count queries
+        patched = re.sub(r'\"__inputs\"\s*:\s*\[[^\]]*\]', '\"__inputs\": []', content)
+        patched = patched.replace('$${DS_PROMETHEUS}', 'Prometheus')
+        patched = patched.replace('\"docker_n_containers_running\"', '\"max(docker_n_containers_running)\"')
+        patched = patched.replace('\"docker_n_containers_stopped\"', '\"max(docker_n_containers_stopped)\"')
+
+        # Clear old files and write patched dashboard
+        out_dir = "/dashboards"
+        for f in os.listdir(out_dir):
+            os.remove(os.path.join(out_dir, f))
+
+        out_path = os.path.join(out_dir, "docker_telegraf.json")
+        with open(out_path, "w") as f:
+            f.write(patched)
+
+        drift_dashboard = """{
+          "editable": true,
+          "panels": [
+            {
+              "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+              "id": 1,
+              "title": "Input Feature Drift Status",
+              "type": "stat",
+              "targets": [{ "datasource": { "type": "prometheus", "uid": "Prometheus" }, "expr": "evidently_input_dataset_drift", "refId": "A" }],
+              "options": { "graphMode": "area" },
+              "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "NORMAL", "color": "green" }, "1": { "text": "INPUT DRIFT", "color": "red" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+            },
+            {
+              "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+              "id": 6,
+              "title": "Output Prediction Drift Status",
+              "type": "stat",
+              "targets": [{ "datasource": { "type": "prometheus", "uid": "Prometheus" }, "expr": "evidently_output_prediction_drift", "refId": "A" }],
+              "options": { "graphMode": "area" },
+              "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "STABLE", "color": "green" }, "1": { "text": "TARGET DRIFT", "color": "red" } } }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+            },
+            {
+              "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+              "id": 2,
+              "title": "Drifted Features Count",
+              "type": "stat",
+              "targets": [{ "datasource": { "type": "prometheus", "uid": "Prometheus" }, "expr": "evidently_input_number_of_drifted_columns", "refId": "A" }],
+              "options": { "graphMode": "area" },
+              "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }] } } }
+            },
+            {
+              "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+              "id": 3,
+              "title": "Input Drift Share %",
+              "type": "stat",
+              "targets": [{ "datasource": { "type": "prometheus", "uid": "Prometheus" }, "expr": "evidently_input_drift_share * 100", "refId": "A" }],
+              "options": { "graphMode": "area" },
+              "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 20 }, { "color": "red", "value": 50 }] } } }
+            },
+            {
+              "gridPos": { "h": 10, "w": 24, "x": 0, "y": 6 },
+              "id": 4,
+              "title": "Per-Feature Drift Distance / Score",
+              "type": "bargauge",
+              "targets": [{ "datasource": { "type": "prometheus", "uid": "Prometheus" }, "expr": "evidently_column_drift_score", "legendFormat": "{{column_name}}", "refId": "A" }],
+              "options": { "displayMode": "gradient", "orientation": "horizontal" },
+              "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.5 }] } } }
+            }
+          ],
+          "refresh": "5s",
+          "schemaVersion": 38,
+          "style": "dark",
+          "tags": ["evidently", "mlops", "drift"],
+          "title": "Evidently AI - Data Drift Dashboard",
+          "uid": "evidently-data-drift",
+          "version": 1
+        }"""
+        drift_path = os.path.join(out_dir, "evidently_data_drift.json")
+        with open(drift_path, "w") as f:
+            f.write(drift_dashboard)
+
+        print(f"Saved Docker dashboard to {out_path} and Evidently dashboard to {drift_path}")
+
+  # ----------------------------------------------------------------------------
+  # 2. NGINX Reverse Proxy
+  # ----------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27.4-alpine
+    container_name: local_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - mlops-net
+    depends_on:
+      floci:
+        condition: service_healthy
+      grafana:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+  # ----------------------------------------------------------------------------
+  # 3. Local AWS Emulator (Floci)
+  # ----------------------------------------------------------------------------
+  floci:
+    image: floci/floci:1.6.0
+    container_name: local_aws_floci
+    ports:
+      - "4566:4566"
+    environment:
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - PERSISTENCE=1
+    volumes:
+      - floci_data:/var/lib/floci
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - mlops-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_floci/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+
+  # ----------------------------------------------------------------------------
+  # 4. Local AWS Web Management Dashboard (Floci UI)
+  # ----------------------------------------------------------------------------
+  floci-ui:
+    image: floci/floci-ui:0.2.0
+    container_name: local_floci_ui
+    ports:
+      - "8080:8080"
+    environment:
+      - FLOCI_ENDPOINT=http://floci:4566
+      - AWS_ENDPOINT_URL=http://floci:4566
+      - FLOCI_HOST=floci
+      - PORT=8080
+      - AWS_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+    networks:
+      - mlops-net
+    depends_on:
+      floci:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+
+  # ----------------------------------------------------------------------------
+  # 5. Container Telemetry Collector (Pure Docker API - Telegraf)
+  # ----------------------------------------------------------------------------
+  docker-metrics:
+    image: telegraf:1.34.0-alpine
+    container_name: local_docker_metrics
+    user: root
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat <<'EOF' > /etc/telegraf/telegraf.conf
+        [agent]
+          interval = "5s"
+          flush_interval = "5s"
+
+        [[inputs.docker]]
+          endpoint = "unix:///var/run/docker.sock"
+          gather_services = false
+          container_name_include = []
+          timeout = "5s"
+
+        [[outputs.prometheus_client]]
+          listen = ":9273"
+          metric_version = 2
+        EOF
+        exec telegraf
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - mlops-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9273/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+
+  # ----------------------------------------------------------------------------
+  # 6. Host System Metric Exporter (node-exporter)
+  # ----------------------------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:v1.9.0
+    container_name: local_node_exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+    networks:
+      - mlops-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9100/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
+
+  # ----------------------------------------------------------------------------
+  # 7. Time-Series Database (Prometheus)
+  # ----------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: local_prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - mlops-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ----------------------------------------------------------------------------
+  # 8. Telemetry Dashboard (Grafana)
+  # ----------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:13.1.3
+    container_name: local_grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./config/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      # Reads dynamically generated dashboard from shared volume
+      - provisioned_dashboards:/etc/grafana/provisioning/dashboards/json:ro
+    networks:
+      - mlops-net
+    depends_on:
+      dashboard-init:
+        condition: service_completed_successfully
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ----------------------------------------------------------------------------
+  # 9. MLflow Experiment Tracking & Model Registry
+  # ----------------------------------------------------------------------------
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.15.1
+    container_name: local_mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_S3_ENDPOINT_URL=http://floci:4566
+      - AWS_ENDPOINT_URL=http://floci:4566
+      - AWS_ENDPOINT_URL_S3=http://floci:4566
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "pip install --no-cache-dir boto3 botocore &&
+      exec mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root s3://mlops-artifacts/mlflow/
+      --host 0.0.0.0
+      --port 5000
+      --workers 1
+      --cors-allowed-origins '*'"
+    volumes:
+      - mlflow_data:/mlflow
+    networks:
+      - mlops-net
+    depends_on:
+      floci:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+
+  # ----------------------------------------------------------------------------
+  # 10. FastAPI Model Serving Service
+  # ----------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: local_model_api
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_S3_ENDPOINT_URL=http://floci:4566
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    volumes:
+      - ./models:/app/models:ro
+      - ./src:/app/src:ro
+      - ./docs:/app/docs:ro
+    networks:
+      - mlops-net
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ----------------------------------------------------------------------------
+  # 11. Evidently AI Interactive UI Dashboard (Floci S3 Workspace Backend)
+  # ----------------------------------------------------------------------------
+  evidently:
+    build:
+      context: .
+      dockerfile: Dockerfile.evidently
+    image: evidently/evidently-service:0.7.21-s3
+    container_name: local_evidently_ui
+    depends_on:
+      floci:
+        condition: service_healthy
+    ports:
+      - "8085:8000"
+    environment:
+      - EVIDENTLY_DEBUG=1
+    volumes:
+      - ./workspace:/app/workspace
+    command: ["--port", "8000", "--workspace", "/app/workspace"]
+    networks:
+      - mlops-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/version')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M

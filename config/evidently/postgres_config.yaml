@@ -1,0 +1,15 @@
+service:
+  host: 0.0.0.0
+  port: 8000
+
+storage:
+  type: postgres
+  connection:
+    db_name: evidently
+    user: evidently_user
+    password: evidently_password
+    host: evidently-postgres
+    port: 5432
+
+projects:
+  location: /app/workspace

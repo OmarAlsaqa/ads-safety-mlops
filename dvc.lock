@@ -1,0 +1,84 @@
+schema: '2.0'
+stages:
+  preprocess:
+    cmd: python src/preprocess.py
+    deps:
+    - path: data/raw/iaq_classification.csv
+      hash: md5
+      md5: 946f678ad750dc895ac14aa8f3b39548
+      size: 18942940
+      isexec: true
+    - path: src/preprocess.py
+      hash: md5
+      md5: 3fd2e3c4c7dc90fdd621566d81c2ffb6
+      size: 3123
+      isexec: true
+    - path: src/schema.py
+      hash: md5
+      md5: 4b6eaaadb643061b967dc67aeb248682
+      size: 3327
+      isexec: true
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: eab4b731b215a03c338e02439cb13f0d.dir
+      size: 4205467
+      nfiles: 3
+    - path: data/simulated_production/production_drift_stream.csv
+      hash: md5
+      md5: 706db71a3edf941b0aae05fcb6f62921
+      size: 4042236
+      isexec: true
+  train:
+    cmd: python src/train.py
+    deps:
+    - path: data/processed/train.parquet
+      hash: md5
+      md5: d8bf36557e4435f1eae37552a28a0995
+      size: 2898268
+      isexec: true
+    - path: data/processed/val.parquet
+      hash: md5
+      md5: a887c8625c1cfb9545b58f7bc977cff4
+      size: 692101
+      isexec: true
+    - path: src/train.py
+      hash: md5
+      md5: 8a1b2d327e6236ce5e63bdf323baa7af
+      size: 4117
+      isexec: true
+    outs:
+    - path: models/model.pkl
+      hash: md5
+      md5: d2cbdbe9ad566a8dc996086824b5e626
+      size: 1920293
+      isexec: true
+  evaluate_drift:
+    cmd: python src/evaluate_drift.py
+    deps:
+    - path: data/processed/train.parquet
+      hash: md5
+      md5: d8bf36557e4435f1eae37552a28a0995
+      size: 2898268
+      isexec: true
+    - path: data/simulated_production/production_drift_stream.csv
+      hash: md5
+      md5: 706db71a3edf941b0aae05fcb6f62921
+      size: 4042236
+      isexec: true
+    - path: src/evaluate_drift.py
+      hash: md5
+      md5: 527e61381077f1d5a94d57a3802df79f
+      size: 2666
+      isexec: true
+    outs:
+    - path: docs/reports/data_drift_report.html
+      hash: md5
+      md5: c81ce0d2bc2ad79fdc7eb994377ed682
+      size: 4074785
+      isexec: true
+    - path: docs/reports/data_drift_summary.json
+      hash: md5
+      md5: 7ac1db459c519ec9d44e6aa231a67543
+      size: 12526
+      isexec: true

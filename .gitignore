@@ -1,0 +1,23 @@
+# Local Environment Variables & Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Temporary files & node modules
+node_modules/
+capture_dashboard.js
+scratch/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# Generated local Evidently workspace
+workspace/
+
+# OS metadata
+.DS_Store
+Thumbs.db

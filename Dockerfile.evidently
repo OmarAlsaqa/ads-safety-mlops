@@ -1,0 +1,4 @@
+FROM evidently/evidently-service:0.7.21
+
+# Install s3fs so Evidently's fsspec storage engine can resolve both local and S3 workspaces seamlessly
+RUN pip install --no-cache-dir s3fs fsspec

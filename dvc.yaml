@@ -1,0 +1,29 @@
+stages:
+  preprocess:
+    cmd: python src/preprocess.py
+    deps:
+      - src/preprocess.py
+      - src/schema.py
+      - data/raw/iaq_classification.csv
+    outs:
+      - data/processed
+      - data/simulated_production/production_drift_stream.csv
+
+  train:
+    cmd: python src/train.py
+    deps:
+      - src/train.py
+      - data/processed/train.parquet
+      - data/processed/val.parquet
+    outs:
+      - models/model.pkl
+
+  evaluate_drift:
+    cmd: python src/evaluate_drift.py
+    deps:
+      - src/evaluate_drift.py
+      - data/processed/train.parquet
+      - data/simulated_production/production_drift_stream.csv
+    outs:
+      - docs/reports/data_drift_report.html
+      - docs/reports/data_drift_summary.json
