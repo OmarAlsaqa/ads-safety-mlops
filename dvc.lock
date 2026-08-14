@@ -15,8 +15,8 @@ stages:
       isexec: true
     - path: src/schema.py
       hash: md5
-      md5: 369180dceaecb2362b48719d0c177058
-      size: 2107
+      md5: 7b61a5ff61f51a56ee8d1a522d881970
+      size: 2091
       isexec: true
     outs:
     - path: data/processed/ad_click_graph.pt
@@ -69,46 +69,51 @@ stages:
       isexec: true
     - path: src/train.py
       hash: md5
-      md5: bcb9f16e0cfad913b41b68988d9bc0f2
-      size: 13724
+      md5: 15f0fc0480c4aa02976ad98e68eb837b
+      size: 14090
       isexec: true
     outs:
     - path: models/graph_nc.pt
       hash: md5
-      md5: 58babdb89a67ac172d9baf99202e3692
+      md5: 27b60f435e1ba016fbe1e8ce2383b3a2
       size: 88575
       isexec: true
     - path: models/training_metrics.json
       hash: md5
-      md5: 923e009e98caa6e4aaa19383b2ac80ed
-      size: 285
+      md5: 0b068e6b9ed29164eb6f68ca9150fced
+      size: 290
       isexec: true
   evaluate_drift:
     cmd: python src/evaluate_drift.py
     deps:
     - path: data/processed/train.parquet
       hash: md5
-      md5: d8bf36557e4435f1eae37552a28a0995
-      size: 2898268
+      md5: 30211aa4c0c77a1d9021420ef00de041
+      size: 1095430
       isexec: true
     - path: data/simulated_production/production_drift_stream.csv
       hash: md5
-      md5: 706db71a3edf941b0aae05fcb6f62921
-      size: 4042236
+      md5: 80e1d04c5f8d8bebe4486d75578f2f84
+      size: 1151675
+      isexec: true
+    - path: models/graph_nc.pt
+      hash: md5
+      md5: 27b60f435e1ba016fbe1e8ce2383b3a2
+      size: 88575
       isexec: true
     - path: src/evaluate_drift.py
       hash: md5
-      md5: 527e61381077f1d5a94d57a3802df79f
-      size: 2666
+      md5: 902cc365ddb76b44a5c54112307167d7
+      size: 5962
       isexec: true
     outs:
     - path: docs/reports/data_drift_report.html
       hash: md5
-      md5: c81ce0d2bc2ad79fdc7eb994377ed682
-      size: 4074785
+      md5: f91b2bd6a1f598b79bc038f17fd596ec
+      size: 3909220
       isexec: true
     - path: docs/reports/data_drift_summary.json
       hash: md5
-      md5: 7ac1db459c519ec9d44e6aa231a67543
-      size: 12526
+      md5: 46d660e5e31ab08b4140ad21ab1e1dc8
+      size: 7016
       isexec: true

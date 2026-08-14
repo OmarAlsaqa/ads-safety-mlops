@@ -23,14 +23,14 @@ stages:
     outs:
       - models/graph_nc.pt
       - models/training_metrics.json
-  #
-  # evaluate_drift:
-  #   cmd: python src/evaluate_drift.py
-  #   deps:
-  #     - src/evaluate_drift.py
-  #     - data/processed/train.parquet
-  #     - data/simulated_production/production_drift_stream.csv
-  #   outs:
-  #     - docs/reports/data_drift_report.html
-  #     - docs/reports/data_drift_summary.json
+  evaluate_drift:
+    cmd: python src/evaluate_drift.py
+    deps:
+      - src/evaluate_drift.py
+      - data/processed/train.parquet
+      - data/simulated_production/production_drift_stream.csv
+      - models/graph_nc.pt
+    outs:
+      - docs/reports/data_drift_report.html
+      - docs/reports/data_drift_summary.json
 

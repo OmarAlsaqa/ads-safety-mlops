@@ -1,59 +1,75 @@
-# Longitudinal Indoor Air Quality Dataset Setup Guide
+# Kaggle Dataset Download Guide
 
-[![Back to Main README](https://img.shields.io/badge/Back_to-Main_README-181717?style=flat-square&logo=github&logoColor=white)](../README.md)
-
-This guide documents how to manually download, extract, clean up, and set up the **Longitudinal Indoor Air Quality Dataset (Classification Subset)** for model training and local S3 object storage upload.
+This guide details how to download and extract the full [TalkingData AdTracking Fraud Detection](https://www.kaggle.com/competitions/talkingdata-adtracking-fraud-detection) dataset (~1.94 GB compressed) into `data/raw/`.
 
 ---
 
-## 📌 Dataset Overview
+## ⚠️ Prerequisite: Accept Competition Rules (Mandatory)
 
-- **Dataset Source:** [Mendeley Data - Longitudinal Indoor Air Quality Dataset (v2)](https://data.mendeley.com/datasets/b5jvs7kykn/2)
-- **Selected File:** `IAQ_Classification_Subset.csv`
-- **Description:** Contains 139,074 high-frequency instances of indoor air quality sensor readings (Temperature, Humidity, Pressure, Gas Resistance, PM2.5, TVOC, eCO2, VOC Index, MQ135, Voltage, PPM) cleaned for indoor air quality risk classification and alerting.
-- **Download Requirement:** Requires **manual downloading** from Mendeley Data due to portal download restrictions.
-- **Target Local File:** `data/raw/iaq_classification.csv`
+Before Kaggle allows API downloads, you must accept the competition terms on their site:
+1. Open **[talkingdata-adtracking-fraud-detection/rules](https://www.kaggle.com/competitions/talkingdata-adtracking-fraud-detection/rules)**.
+2. Click **"I Understand and Accept"**.
 
 ---
 
-## 🚀 Manual Download & Setup Commands
+## 🔑 How to Get Your Kaggle API Credentials
 
-### Step 1: Download Archive Manually
-1. Open [Mendeley Data - Longitudinal Indoor Air Quality Dataset](https://data.mendeley.com/datasets/b5jvs7kykn/2).
-2. Download the ZIP file: **`Longitudinal Indoor Air Quality Dataset Collected.zip`**.
-3. Place the downloaded `.zip` file into your project's `data/raw/` directory.
+1. Go to [kaggle.com/settings](https://www.kaggle.com/settings).
+2. Scroll to the **API** section.
+3. Click **"Create New Token"** (downloads a `kaggle.json` file).
+4. Open `kaggle.json` to find:
+   - `"username"`: your Kaggle username
+   - `"key"`: your 32-character API key
 
 ---
 
-### Step 2: Extract & Clean Up Commands
+## 🚀 Step-by-Step Download & Extraction Commands
 
-Run the following commands in your terminal from `data/raw/`:
+Follow these clear, step-by-step commands in your terminal:
 
+### Step 1: Install the Kaggle CLI
 ```bash
-# 0. Make the data/raw/ directory
-mkdir -p data/raw data/processed data/simulated_production
+pip install kaggle
+```
 
-# 1. Navigate to the raw data directory
+### Step 2: Set Your Kaggle Credentials in the Terminal Session
+Set your environment variables (replace with your actual username and key/token):
+```bash
+export KAGGLE_USERNAME="your_username"
+export KAGGLE_KEY="your_api_key_or_token"
+```
+
+### Step 3: Create the Raw Data Directory
+```bash
+cd /mnt/d/Projects/fcma/ads-safety-mlops
+mkdir -p data/raw
+```
+
+### Step 4: Download the Full Competition Dataset
+This downloads the 1.94 GB archive (`talkingdata-adtracking-fraud-detection.zip`) directly into `data/raw/`:
+```bash
+kaggle competitions download -c talkingdata-adtracking-fraud-detection -p data/raw/
+```
+
+### Step 5: Unzip the Dataset Archive
+Unzipping the archive directly inflates all competition files (`train_sample.csv`, `train.csv`, `test.csv`):
+```bash
 cd data/raw
-
-# 2. Extract the downloaded Mendeley dataset archive
-unzip "Longitudinal Indoor Air Quality Dataset Collected.zip"
-
-# 3. Move and rename the Classification Subset CSV to data/raw/iaq_classification.csv
-mv "Longitudinal Indoor Air Quality Dataset Collected/Research_Subsets/IAQ_Classification_Subset.csv" ./iaq_classification.csv
-
-# 4. Remove unneeded extracted folders, zip archive, and old UCI dataset files
-rm -rf "Longitudinal Indoor Air Quality Dataset Collected" \
-       "Longitudinal Indoor Air Quality Dataset Collected.zip"
+unzip talkingdata-adtracking-fraud-detection.zip
+rm talkingdata-adtracking-fraud-detection.zip
+cd ../..
 ```
 
 ---
 
-## 📂 Expected Directory Structure
+## 🔍 Step 6: Verify the Extracted Dataset
 
-After running the cleanup commands, your `data/raw/` directory will cleanly contain only:
+Check the first few rows:
+```bash
+head -n 5 data/raw/train_sample.csv
+```
 
-```text
-data/raw/
-└── iaq_classification.csv     # Primary dataset (139,074 rows x 12 attributes)
+Expected schema:
+```csv
+ip,app,device,os,channel,click_time,attributed_time,is_attributed
 ```

@@ -14,11 +14,23 @@ from sklearn.metrics import (
     precision_recall_curve,
     confusion_matrix,
 )
+import sys
+from pathlib import Path
 import mlflow
 import mlflow.pytorch
 from mlflow.tracking import MlflowClient
 
-from models.graph_nc import GraphNC
+# Ensure src and project root are in sys.path
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+if str(BASE_DIR / "src") not in sys.path:
+    sys.path.insert(0, str(BASE_DIR / "src"))
+
+try:
+    from src.models.graph_nc import GraphNC
+except ImportError:
+    from models.graph_nc import GraphNC
 
 # Local S3 and MLflow environment configuration
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:4566")

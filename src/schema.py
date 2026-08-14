@@ -5,7 +5,7 @@ from pandera.typing import Series
 class RawAdClickSchema(pa.DataFrameModel):
     """
     Pandera Schema for validating raw incoming ad click streams.
-    Enforces data types and ranges based on the Kaggle TalkingData / Google Ads standard schema.
+    Enforces data types and ranges based on standard ad fraud detection schemas.
     """
     ip: Series[int] = pa.Field(ge=0, nullable=False)
     app: Series[int] = pa.Field(ge=0, nullable=False)

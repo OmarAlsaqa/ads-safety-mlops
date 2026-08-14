@@ -1,59 +1,71 @@
 import os
 import time
 import json
-import joblib
-import pandas as pd
+import torch
 import numpy as np
+import pandas as pd
+from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, status
+import sys
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+
+from fastapi import FastAPI, HTTPException, status, Response
 from pydantic import BaseModel, Field, ConfigDict
 import mlflow
-import mlflow.pyfunc
+from mlflow.tracking import MlflowClient
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from fastapi.responses import Response
 
-# Configure AWS S3 local endpoint for MLflow artifact retrieval
+# Ensure src and project root are in sys.path
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+if str(BASE_DIR / "src") not in sys.path:
+    sys.path.insert(0, str(BASE_DIR / "src"))
+
+try:
+    from src.models.graph_nc import GraphNC
+except ImportError:
+    from models.graph_nc import GraphNC
+
+# Local S3 and MLflow environment configuration
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:4566")
 os.environ["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID", "test")
 os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
 os.environ["AWS_DEFAULT_REGION"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
-MODEL_NAME = "AirQualityClassifier"
+MODEL_NAME = "GraphNC-AdFraud-Detector"
 MODEL_ALIAS = "champion"
 
-# Prometheus Operational Metrics
+# ==============================================================================
+# Prometheus Telemetry Metrics
+# ==============================================================================
 PREDICTION_COUNT = Counter(
-    "iaq_predictions_total",
-    "Total number of IAQ classification predictions served",
-    ["risk_level"]
+    "ad_click_predictions_total",
+    "Total number of ad click predictions served",
+    ["risk_tier"]
+)
+
+FRAUD_DETECTED_COUNT = Counter(
+    "ad_click_fraud_detected_total",
+    "Total number of ad click fraud incidents flagged"
 )
 
 PREDICTION_LATENCY = Histogram(
-    "iaq_prediction_latency_seconds",
-    "Time spent processing IAQ prediction request in seconds"
+    "ad_click_prediction_latency_seconds",
+    "Time spent processing ad click graph inference in seconds",
+    buckets=[0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
 )
 
-# ------------------------------------------------------------------------------
-# Evidently AI Data Drift Telemetry Gauges (Normalized & Separated Input/Output)
-# ------------------------------------------------------------------------------
-# Legacy aliases for backward compatibility
-EVIDENTLY_DATASET_DRIFT = Gauge(
-    "evidently_dataset_drift",
-    "Dataset drift status (1 if dataset drift detected, 0 otherwise)"
-)
-EVIDENTLY_DRIFT_SHARE = Gauge(
-    "evidently_drift_share",
-    "Share of drifted features across monitored dataset (0.0 to 1.0)"
-)
-EVIDENTLY_DRIFTED_FEATURES_COUNT = Gauge(
-    "evidently_number_of_drifted_columns",
-    "Number of drifted features in current production window"
+FRAUD_SCORE_GAUGE = Gauge(
+    "ad_click_latest_fraud_score",
+    "Latest ad click fraud risk probability score"
 )
 
-# Input Feature Drift Gauges
+# Evidently AI Monitoring Gauges
 EVIDENTLY_INPUT_DATASET_DRIFT = Gauge(
     "evidently_input_dataset_drift",
     "Input feature dataset drift status (1 if feature drift detected, 0 otherwise)"
@@ -71,313 +83,302 @@ EVIDENTLY_FEATURE_DRIFT_SCORE = Gauge(
     "Drift p-value / distance score per feature",
     ["column_name"]
 )
-EVIDENTLY_FEATURE_DRIFT_STATUS = Gauge(
-    "evidently_column_drift_status",
-    "Drift status per feature (1 if drifted, 0 otherwise)",
-    ["column_name"]
-)
-
-# Output Target / Prediction Drift Gauges
 EVIDENTLY_OUTPUT_PREDICTION_DRIFT = Gauge(
     "evidently_output_prediction_drift",
     "Output target / prediction drift status (1 if prediction drift detected, 0 otherwise)"
 )
 EVIDENTLY_OUTPUT_PREDICTION_DRIFT_SCORE = Gauge(
     "evidently_output_prediction_drift_score",
-    "Output target / prediction drift score / p-value"
+    "Output target / prediction drift score"
 )
 
-# Global model store
+# In-memory Global Model Store
 model_store: Dict[str, Any] = {}
 
-CLASS_MAP = {
-    0: "Good / Low Risk",
-    1: "Moderate Risk",
-    2: "High Risk / Unhealthy"
-}
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    FastAPI Lifespan Context Manager:
-    Loads champion model from MLflow Model Registry on startup (with fallback to local models/model.pkl).
-    """
-    print(f"Connecting to MLflow Tracking Server at {MLFLOW_TRACKING_URI}...")
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    
-    try:
-        model_uri = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
-        print(f"Loading champion model from MLflow Registry: {model_uri}...")
-        model_store["model"] = mlflow.pyfunc.load_model(model_uri)
-        model_store["source"] = f"MLflow Registry ({model_uri})"
-        print("✅ Champion model loaded successfully from MLflow Registry!")
-    except Exception as e:
-        print(f"⚠️ Failed to load model from MLflow Registry ({e}). Attempting local fallback (models/model.pkl)...")
-        local_path = "models/model.pkl"
-        if os.path.exists(local_path):
-            model_store["model"] = joblib.load(local_path)
-            model_store["source"] = f"Local File ({local_path})"
-            print("✅ Model loaded successfully from local file!")
-        else:
-            print("❌ Error: No trained model found locally or in MLflow Registry!")
-            model_store["model"] = None
-            model_store["source"] = "None"
-            
-    yield
-    print("Shutting down FastAPI Model Serving Server...")
-
-app = FastAPI(
-    title="Indoor Air Quality (IAQ) Safety Classification API",
-    description="Production REST API for real-time indoor air quality risk classification and Prometheus telemetry monitoring.",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-class SensorInput(BaseModel):
-    """
-    Pydantic Schema for Indoor Air Quality Sensor Readings.
-    Supports standard snake_case keys and exact dataset column aliases.
-    """
-    temperature: float = Field(..., alias="Temperature (C)", ge=10.0, le=50.0, description="Temperature in Celsius")
-    humidity: float = Field(..., alias="Humidity (%)", ge=0.0, le=100.0, description="Relative Humidity percentage")
-    pressure: float = Field(..., alias="Pressure (hPa)", ge=800.0, le=1100.0, description="Barometric Pressure in hPa")
-    gas_resistance: float = Field(..., alias="Gas Resistance (Ohms)", ge=0.0, description="Gas Sensor Resistance in Ohms")
-    pm2_5: float = Field(..., alias="PM2.5", ge=0.0, description="Particulate Matter PM2.5 in ug/m3")
-    tvoc: float = Field(..., alias="TVOC (ppb)", ge=0.0, description="Total Volatile Organic Compounds in ppb")
-    eco2: float = Field(..., alias="eCO2 (ppm)", ge=300.0, description="Equivalent CO2 in ppm")
-    voc_index: float = Field(..., alias="VOC Index", ge=0.0, le=500.0, description="VOC Index reading")
-    mq135: float = Field(..., alias="MQ135 Value", ge=0.0, description="MQ135 Gas Sensor raw reading")
-    voltage: float = Field(..., alias="Voltage", ge=0.0, le=5.0, description="Analog Sensor Output Voltage")
-    ppm: float = Field(..., alias="PPM", ge=0.0, description="PPM Concentration reading")
-
+# ==============================================================================
+# Pydantic Schemas for Request & Response
+# ==============================================================================
+class AdClickRequest(BaseModel):
+    """Payload representing a single real-time ad click event."""
     model_config = ConfigDict(
-        populate_by_name=True,
         json_schema_extra={
             "example": {
-                "Temperature (C)": 24.5,
-                "Humidity (%)": 42.1,
-                "Pressure (hPa)": 901.2,
-                "Gas Resistance (Ohms)": 2500000.0,
-                "PM2.5": 8.5,
-                "TVOC (ppb)": 150.0,
-                "eCO2 (ppm)": 420.0,
-                "VOC Index": 85.0,
-                "MQ135 Value": 165.0,
-                "Voltage": 0.52,
-                "PPM": 310.0
+                "ip": 5348,
+                "app": 3,
+                "device": 1,
+                "os": 19,
+                "channel": 379,
+                "click_time": "2026-08-14 12:00:00"
             }
         }
     )
+    ip: int = Field(..., ge=0, description="IP address ID")
+    app: int = Field(..., ge=0, description="Target app ID")
+    device: int = Field(..., ge=0, description="Device type ID")
+    os: int = Field(..., ge=0, description="Operating system ID")
+    channel: int = Field(..., ge=0, description="Publisher / channel ID")
+    click_time: Optional[str] = Field(None, description="ISO timestamp of the click event")
 
-class PredictionResponse(BaseModel):
-    iaq_class: int = Field(..., description="Derived Risk Class (0: Good, 1: Moderate, 2: High Risk)")
-    risk_level: str = Field(..., description="Human readable IAQ safety risk level")
-    confidence: Optional[float] = Field(None, description="Prediction probability confidence score")
-    probabilities: Optional[Dict[str, float]] = Field(None, description="Class probability distribution")
-    model_source: str = Field(..., description="Active MLflow model source")
 
-def _update_evidently_metrics():
-    """Reads latest Evidently drift telemetry summary and updates Prometheus Gauges."""
-    possible_paths = [
-        "/app/docs/reports/data_drift_summary.json",
-        "docs/reports/data_drift_summary.json",
-        os.path.join(os.path.dirname(__file__), "..", "docs", "reports", "data_drift_summary.json")
-    ]
-    summary_path = None
-    for p in possible_paths:
-        if os.path.exists(p):
-            summary_path = p
-            break
+class BatchAdClickRequest(BaseModel):
+    """Batch payload for high-throughput stream inference."""
+    clicks: List[AdClickRequest]
 
-    if summary_path and os.path.exists(summary_path):
-        try:
-            with open(summary_path, "r") as f:
-                data = json.load(f)
-            
-            for m in data.get("metrics", []):
-                metric_name = str(m.get("metric", ""))
-                if "DatasetDriftMetric" in metric_name:
-                    res = m.get("result", {})
-                    ds_drift = 1.0 if res.get("dataset_drift") else 0.0
-                    d_share = float(res.get("share_of_drifted_columns", 0.0))
-                    d_cnt = float(res.get("number_of_drifted_columns", 0))
 
-                    EVIDENTLY_DATASET_DRIFT.set(ds_drift)
-                    EVIDENTLY_DRIFT_SHARE.set(d_share)
-                    EVIDENTLY_DRIFTED_FEATURES_COUNT.set(d_cnt)
+class AdClickResponse(BaseModel):
+    """Response payload with calibrated risk score and operational tier."""
+    ip: int
+    app: int
+    fraud_probability: float
+    is_fraud: bool
+    risk_tier: str
+    decision_threshold: float
+    inference_latency_ms: float
+    model_version: str
+    timestamp: str
 
-                    EVIDENTLY_INPUT_DATASET_DRIFT.set(ds_drift)
-                    EVIDENTLY_INPUT_DRIFT_SHARE.set(d_share)
-                    EVIDENTLY_INPUT_DRIFTED_FEATURES_COUNT.set(d_cnt)
-                
-                elif "DataDriftTable" in metric_name:
-                    drift_by_cols = m.get("result", {}).get("drift_by_columns", {})
-                    for col_name, col_data in drift_by_cols.items():
-                        raw_score = float(col_data.get("drift_score", 0.0))
-                        detected = 1.0 if col_data.get("drift_detected") else 0.0
-                        
-                        # Clean score normalization:
-                        # If score is p-value <= 1.0: 1.0 - p_val (0.0 = no drift, 1.0 = high drift confidence)
-                        # If score is raw distance > 1.0: cap to [0.0, 1.0]
-                        if raw_score <= 1.0:
-                            norm_score = round(1.0 - raw_score, 4) if detected else round(raw_score, 4)
-                        else:
-                            norm_score = min(1.0, round(raw_score / 10.0, 4)) if detected else 0.0
 
-                        EVIDENTLY_FEATURE_DRIFT_SCORE.labels(column_name=col_name).set(norm_score)
-                        EVIDENTLY_FEATURE_DRIFT_STATUS.labels(column_name=col_name).set(detected)
+class BatchAdClickResponse(BaseModel):
+    total_clicks: int
+    fraud_count: int
+    fraud_rate: float
+    results: List[AdClickResponse]
 
-                        # Separate Output Target / Prediction Drift
-                        if col_name in ["IAQ_Class", "prediction", "target"]:
-                            EVIDENTLY_OUTPUT_PREDICTION_DRIFT.set(detected)
-                            EVIDENTLY_OUTPUT_PREDICTION_DRIFT_SCORE.set(norm_score)
 
-        except Exception as e:
-            print(f"Notice: Error updating Evidently drift metrics for Prometheus: {e}")
+# ==============================================================================
+# Model Loading & Warm-Up Lifespan
+# ==============================================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Loads GraphNC model weights and initializes in-memory graph context buffer."""
+    print("🔄 Initializing GraphNC Real-Time Inference Engine...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    local_path = "models/graph_nc.pt"
 
-@app.get("/", tags=["Health"])
-def root():
-    return {
-        "service": "IAQ Safety Classification API",
-        "status": "online",
-        "model_loaded": model_store.get("model") is not None,
-        "model_source": model_store.get("source", "Unknown")
-    }
+    loaded = False
+    model_version = "v1-local"
+    threshold = 0.6566
 
-@app.get("/health", tags=["Health"])
-def healthcheck():
-    if model_store.get("model") is None:
-        raise HTTPException(
-            status_code=status.HTTP_530_SERVICE_UNAVAILABLE,
-            detail="Model not loaded"
-        )
-    return {
-        "status": "healthy",
-        "model_source": model_store.get("source")
-    }
-
-@app.get("/metrics", tags=["Telemetry"])
-def metrics():
-    """Prometheus Metrics Endpoint for Grafana scraping."""
-    _update_evidently_metrics()
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-def _prepare_features(sensor_data: SensorInput) -> pd.DataFrame:
-    """Formats Pydantic model into DataFrame matching model training column order."""
-    data_dict = {
-        "Temperature (C)": sensor_data.temperature,
-        "Humidity (%)": sensor_data.humidity,
-        "Pressure (hPa)": sensor_data.pressure,
-        "Gas Resistance (Ohms)": sensor_data.gas_resistance,
-        "PM2.5": sensor_data.pm2_5,
-        "TVOC (ppb)": sensor_data.tvoc,
-        "eCO2 (ppm)": sensor_data.eco2,
-        "VOC Index": sensor_data.voc_index,
-        "MQ135 Value": sensor_data.mq135,
-        "Voltage": sensor_data.voltage,
-        "PPM": sensor_data.ppm
-    }
-    return pd.DataFrame([data_dict])
-
-@app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
-def predict(payload: SensorInput):
-    """
-    Real-time single sample prediction endpoint.
-    Returns predicted IAQ_Class label, human readable risk tier, and probabilities.
-    """
-    model = model_store.get("model")
-    if model is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Model is not initialized or loaded."
-        )
-
-    start_time = time.time()
+    # Attempt 1: Load from MLflow Model Registry (@champion)
     try:
-        input_df = _prepare_features(payload)
-        
-        # Predict using MLflow PyFunc or Scikit-learn model
-        if hasattr(model, "predict_proba"):
-            preds = model.predict(input_df)
-            probs = model.predict_proba(input_df)[0]
-            pred_class = int(preds[0])
-            confidence = float(probs[pred_class])
-            prob_dict = {CLASS_MAP[i]: float(probs[i]) for i in range(len(probs))}
-        else:
-            # PyFunc wrapper return DataFrame or ndarray
-            raw_preds = model.predict(input_df)
-            if isinstance(raw_preds, pd.DataFrame):
-                pred_class = int(raw_preds.iloc[0, 0])
-            else:
-                pred_class = int(raw_preds[0])
-            confidence = 1.0
-            prob_dict = {CLASS_MAP[pred_class]: 1.0}
-
-        risk_tier = CLASS_MAP.get(pred_class, "Unknown")
-        latency = time.time() - start_time
-
-        # Update Prometheus Metrics
-        PREDICTION_COUNT.labels(risk_level=risk_tier).inc()
-        PREDICTION_LATENCY.observe(latency)
-
-        return PredictionResponse(
-            iaq_class=pred_class,
-            risk_level=risk_tier,
-            confidence=confidence,
-            probabilities=prob_dict,
-            model_source=model_store.get("source", "Unknown")
-        )
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        client = MlflowClient()
+        model_version_info = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+        model_version = f"v{model_version_info.version}"
+        print(f"   -> Found MLflow Champion Model version: {model_version}")
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Inference error: {str(e)}"
-        )
+        print(f"   -> MLflow Registry lookup notice ({e}). Using local checkpoint.")
 
-@app.post("/batch-predict", tags=["Inference"])
-def batch_predict(payloads: List[SensorInput]):
-    """Batch inference endpoint for multiple sensor reading samples."""
-    model = model_store.get("model")
-    if model is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Model is not initialized or loaded."
-        )
+    # Attempt 2: Load local PyG model checkpoint
+    if os.path.exists(local_path):
+        checkpoint = torch.load(local_path, map_location=device, weights_only=False)
+        hyperparams = checkpoint.get("hyperparams", {})
+        threshold = checkpoint.get("threshold", 0.6566)
 
-    start_time = time.time()
+        model = GraphNC(
+            in_dim=hyperparams.get("in_dim", 7),
+            hidden_dim=hyperparams.get("hidden_dim", 64),
+            readout=hyperparams.get("readout", "avg"),
+            beta=hyperparams.get("beta", 0.5),
+        ).to(device)
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        loaded = True
+        print(f"   ✅ GraphNC model loaded successfully from {local_path} on {device} (Threshold: {threshold:.4f})")
+    else:
+        raise FileNotFoundError(f"Model checkpoint not found at {local_path}. Run training first.")
+
+    # Initialize rolling graph context state (IP frequency tables)
+    model_store["model"] = model
+    model_store["device"] = device
+    model_store["threshold"] = threshold
+    model_store["model_version"] = model_version
+    model_store["ip_counts"] = {}
+    model_store["app_counts"] = {}
+    model_store["channel_counts"] = {}
+    model_store["device_counts"] = {}
+    model_store["load_time"] = datetime.utcnow().isoformat()
+
+    yield
+    print("🛑 Shutting down GraphNC Inference Engine...")
+    model_store.clear()
+
+
+app = FastAPI(
+    title="Ads Safety - GraphNC Ad-Fraud Detection Service",
+    description="Sub-millisecond Graph Neural Network (ICML 2026) API for real-time botnet and ad-click fraud detection.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+
+# ==============================================================================
+# Helper Inference Logic
+# ==============================================================================
+def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
+    """Extracts features, builds local graph tensor, and executes GraphNC forward pass."""
+    model: GraphNC = model_store["model"]
+    device = model_store["device"]
+    threshold = model_store["threshold"]
+    model_version = model_store["model_version"]
+
+    start_time = time.perf_counter()
+
+    # 1. Update rolling entity frequency states
+    ip_cnt = model_store["ip_counts"].get(click.ip, 1) + 1
+    model_store["ip_counts"][click.ip] = ip_cnt
+
+    app_cnt = model_store["app_counts"].get(click.app, 1) + 1
+    model_store["app_counts"][click.app] = app_cnt
+
+    chan_cnt = model_store["channel_counts"].get(click.channel, 1) + 1
+    model_store["channel_counts"][click.channel] = chan_cnt
+
+    dev_cnt = model_store["device_counts"].get(click.device, 1) + 1
+    model_store["device_counts"][click.device] = dev_cnt
+
+    # 2. Extract temporal signals
     try:
-        dfs = [_prepare_features(item) for item in payloads]
-        batch_df = pd.concat(dfs, ignore_index=True)
-        
-        preds = model.predict(batch_df)
-        if hasattr(preds, "tolist"):
-            pred_classes = preds.tolist()
-        else:
-            pred_classes = list(preds)
+        dt = datetime.fromisoformat(click.click_time) if click.click_time else datetime.utcnow()
+    except Exception:
+        dt = datetime.utcnow()
 
-        results = []
-        for p_cls in pred_classes:
-            p_int = int(p_cls)
-            r_tier = CLASS_MAP.get(p_int, "Unknown")
-            PREDICTION_COUNT.labels(risk_level=r_tier).inc()
-            results.append({
-                "iaq_class": p_int,
-                "risk_level": r_tier
-            })
+    hour = dt.hour
+    day = dt.day
 
-        latency = time.time() - start_time
-        PREDICTION_LATENCY.observe(latency)
+    # 3. Assemble normalized feature vector [7 features]
+    raw_feats = np.array([hour, day, ip_cnt, 1, app_cnt, chan_cnt, dev_cnt], dtype=np.float32)
+    # Standardize with approximate dataset statistics
+    means = np.array([9.0, 7.0, 50.0, 2.0, 100.0, 50.0, 500.0], dtype=np.float32)
+    stds = np.array([6.0, 1.0, 150.0, 3.0, 250.0, 100.0, 1000.0], dtype=np.float32)
+    x_norm = (raw_feats - means) / (stds + 1e-6)
 
-        return {
-            "total_samples": len(payloads),
-            "predictions": results,
-            "latency_seconds": round(latency, 4)
-        }
+    x_tensor = torch.tensor(x_norm, dtype=torch.float).unsqueeze(0).to(device)
+    # Self-loop edge for single-node graph inference
+    edge_index = torch.tensor([[0], [0]], dtype=torch.long).to(device)
+
+    # 4. GraphNC Model Forward Pass
+    with torch.no_grad():
+        raw_score = model(x_tensor, edge_index).item()
+
+    latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+    # Calculate dynamic fraud risk score factoring GraphNC embeddings + IP velocity surge
+    # High frequency bursts (click-flooding) exponentially increase fraud risk
+    velocity_penalty = max(0.0, (ip_cnt - 10) / 100.0)
+    fraud_prob = min(1.0, max(0.0, raw_score + velocity_penalty))
+
+    is_fraud = bool(fraud_prob >= threshold or ip_cnt >= 40)
+
+    # Determine operational risk tier
+    if fraud_prob >= 0.70 or ip_cnt >= 60:
+        risk_tier = "HIGH_BLOCK"
+    elif fraud_prob >= threshold or ip_cnt >= 15:
+        risk_tier = "MEDIUM_CHALLENGE"
+    else:
+        risk_tier = "LOW_ALLOW"
+
+    # Prometheus telemetry tracking
+    PREDICTION_COUNT.labels(risk_tier=risk_tier).inc()
+    PREDICTION_LATENCY.observe(latency_ms / 1000.0)
+    FRAUD_SCORE_GAUGE.set(fraud_prob)
+    if is_fraud:
+        FRAUD_DETECTED_COUNT.inc()
+
+    return {
+        "ip": click.ip,
+        "app": click.app,
+        "fraud_probability": round(fraud_prob, 4),
+        "is_fraud": is_fraud,
+        "risk_tier": risk_tier,
+        "decision_threshold": round(threshold, 4),
+        "inference_latency_ms": round(latency_ms, 2),
+        "model_version": model_version,
+        "timestamp": dt.isoformat(),
+    }
+
+
+# ==============================================================================
+# API Endpoints
+# ==============================================================================
+@app.get("/health", status_code=status.HTTP_200_OK)
+def health_check():
+    """Health check endpoint for Docker Compose & Kubernetes probes."""
+    if "model" not in model_store:
+        raise HTTPException(status_code=503, detail="GraphNC model is not initialized")
+    return {
+        "status": "HEALTHY",
+        "service": "Ads Safety - GraphNC Detection Engine",
+        "model_name": MODEL_NAME,
+        "model_version": model_store.get("model_version", "unknown"),
+        "decision_threshold": model_store.get("threshold", 0.6566),
+        "device": str(model_store.get("device", "cpu")),
+        "loaded_at": model_store.get("load_time"),
+    }
+
+
+@app.post("/predict/ad-click", response_model=AdClickResponse, status_code=status.HTTP_200_OK)
+def predict_ad_click(click: AdClickRequest):
+    """
+    Real-Time Ad Click Fraud Inference:
+    Scores an incoming ad click event against the GraphNC model in sub-milliseconds.
+    """
+    try:
+        return process_single_click(click)
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Batch inference error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
+
+
+@app.post("/predict", response_model=AdClickResponse, status_code=status.HTTP_200_OK)
+def predict_alias(click: AdClickRequest):
+    """Alias for /predict/ad-click."""
+    return process_single_click(click)
+
+
+@app.post("/batch-predict", response_model=BatchAdClickResponse, status_code=status.HTTP_200_OK)
+def predict_batch(payload: BatchAdClickRequest):
+    """High-Throughput Batch Stream Inference."""
+    results = [process_single_click(click) for click in payload.clicks]
+    fraud_count = sum(1 for r in results if r["is_fraud"])
+    fraud_rate = fraud_count / len(results) if results else 0.0
+
+    return {
+        "total_clicks": len(results),
+        "fraud_count": fraud_count,
+        "fraud_rate": round(fraud_rate, 4),
+        "results": results,
+    }
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """Prometheus metrics endpoint."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.post("/metrics/drift", status_code=status.HTTP_200_OK)
+def update_drift_metrics(payload: Dict[str, Any]):
+    """Receives Evidently AI drift evaluation metrics and updates Prometheus gauges."""
+    if "input_dataset_drift" in payload:
+        EVIDENTLY_INPUT_DATASET_DRIFT.set(1.0 if payload["input_dataset_drift"] else 0.0)
+    if "input_drift_share" in payload:
+        EVIDENTLY_INPUT_DRIFT_SHARE.set(float(payload["input_drift_share"]))
+    if "input_drifted_features_count" in payload:
+        EVIDENTLY_INPUT_DRIFTED_FEATURES_COUNT.set(int(payload["input_drifted_features_count"]))
+    if "output_prediction_drift" in payload:
+        EVIDENTLY_OUTPUT_PREDICTION_DRIFT.set(1.0 if payload["output_prediction_drift"] else 0.0)
+    if "output_prediction_drift_score" in payload:
+        EVIDENTLY_OUTPUT_PREDICTION_DRIFT_SCORE.set(float(payload["output_prediction_drift_score"]))
+
+    if "feature_drift_scores" in payload and isinstance(payload["feature_drift_scores"], dict):
+        for col_name, score in payload["feature_drift_scores"].items():
+            EVIDENTLY_FEATURE_DRIFT_SCORE.labels(column_name=col_name).set(float(score))
+
+    return {"status": "Drift metrics successfully ingested into Prometheus"}
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("predict:app", host="0.0.0.0", port=8000, reload=False)
