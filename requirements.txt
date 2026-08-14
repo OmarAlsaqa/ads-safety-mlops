@@ -1,4 +1,17 @@
+# --- PyG Pre-Compiled Wheel Index ---
+# Note: For custom CUDA / CPU wheel matching, see: https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html
+--find-links https://data.pyg.org/whl/torch-2.12.0+cu130.html
+
+# --- Deep Learning & Graph ML ---
+torch==2.12.1
+torchvision==0.27.1
+torch-geometric==2.8.0.post1
+pyg_lib
+torch_scatter
+torch_sparse
+
 # --- Data Processing & EDA ---
+kaggle==2.2.4
 seaborn==0.13.2
 
 # --- Data Validation ---

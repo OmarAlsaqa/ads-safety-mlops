@@ -4,10 +4,23 @@
 *.pem
 *.key
 
-# Temporary files & node modules
+# Large Datasets & Processed Artifacts (Managed by DVC)
+data/raw/
+data/processed/
+data/simulated_production/
+models/*.pkl
+models/*.pt
+models/*.onnx
+
+# Local Clones & Temporary
+external_GraphNC/
+scratch/
 node_modules/
 capture_dashboard.js
-scratch/
+
+# MLflow Local Runs
+mlruns/
+mlflow.db
 
 # Python cache & artifacts
 __pycache__/
@@ -21,3 +34,4 @@ workspace/
 # OS metadata
 .DS_Store
 Thumbs.db
+

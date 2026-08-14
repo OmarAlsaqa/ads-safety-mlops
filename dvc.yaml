@@ -4,26 +4,30 @@ stages:
     deps:
       - src/preprocess.py
       - src/schema.py
-      - data/raw/iaq_classification.csv
+      - data/raw/train_sample.csv
     outs:
-      - data/processed
-      - data/simulated_production/production_drift_stream.csv
-
-  train:
-    cmd: python src/train.py
-    deps:
-      - src/train.py
       - data/processed/train.parquet
       - data/processed/val.parquet
-    outs:
-      - models/model.pkl
-
-  evaluate_drift:
-    cmd: python src/evaluate_drift.py
-    deps:
-      - src/evaluate_drift.py
-      - data/processed/train.parquet
+      - data/processed/test.parquet
+      - data/processed/ad_click_graph.pt
       - data/simulated_production/production_drift_stream.csv
-    outs:
-      - docs/reports/data_drift_report.html
-      - docs/reports/data_drift_summary.json
+
+  # Future stages (uncommented in Step 2: Training & Step 5: Drift Evaluation)
+  # train:
+  #   cmd: python src/train.py
+  #   deps:
+  #     - src/train.py
+  #     - data/processed/ad_click_graph.pt
+  #   outs:
+  #     - models/graph_nc.pt
+  #
+  # evaluate_drift:
+  #   cmd: python src/evaluate_drift.py
+  #   deps:
+  #     - src/evaluate_drift.py
+  #     - data/processed/train.parquet
+  #     - data/simulated_production/production_drift_stream.csv
+  #   outs:
+  #     - docs/reports/data_drift_report.html
+  #     - docs/reports/data_drift_summary.json
+
