@@ -119,6 +119,20 @@ services:
 
         print(f"Saved Docker dashboard to {out_path} and Evidently dashboard to {drift_path}")
 
+        # Automatically ensure S3 buckets exist in Floci
+        for bucket in ["mlops-data", "mlops-artifacts"]:
+            try:
+                b_req = urllib.request.Request(f"http://floci:4566/{bucket}", method="PUT")
+                urllib.request.urlopen(b_req)
+                print(f"Created S3 bucket '{bucket}' in Floci.")
+            except Exception as e:
+                print(f"Bucket '{bucket}' already exists or ready: {e}")
+    networks:
+      - mlops-net
+    depends_on:
+      floci:
+        condition: service_healthy
+
   # ----------------------------------------------------------------------------
   # 2. NGINX Reverse Proxy
   # ----------------------------------------------------------------------------
@@ -200,6 +214,27 @@ services:
     depends_on:
       floci:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+
+  # ----------------------------------------------------------------------------
+  # 4b. Feast Online Key-Value Store (Redis)
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:8.10.0-alpine
+    container_name: ads_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - mlops-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     deploy:
       resources:
         limits:
@@ -398,11 +433,15 @@ services:
     volumes:
       - ./models:/app/models:ro
       - ./src:/app/src:ro
+      - ./feature_store:/app/feature_store:ro
+      - ./data:/app/data:ro
       - ./docs:/app/docs:ro
     networks:
       - mlops-net
     depends_on:
       mlflow:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

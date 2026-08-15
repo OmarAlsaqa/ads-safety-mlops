@@ -10,8 +10,8 @@ stages:
       isexec: true
     - path: src/preprocess.py
       hash: md5
-      md5: 6ff06f0a0b681d17cba1e2b24f3ba361
-      size: 6413
+      md5: 311998bf3339f27c5f71d94241f5124f
+      size: 6540
       isexec: true
     - path: src/schema.py
       hash: md5
@@ -26,23 +26,23 @@ stages:
       isexec: true
     - path: data/processed/test.parquet
       hash: md5
-      md5: 3fabfc8156f9284412ad962a8cb29173
-      size: 256486
+      md5: 9e4553e5ee7c684f3a63e95ad71910ff
+      size: 360779
       isexec: true
     - path: data/processed/train.parquet
       hash: md5
-      md5: 30211aa4c0c77a1d9021420ef00de041
-      size: 1095430
+      md5: b291784e1ee0af159d11431f93782b48
+      size: 1601020
       isexec: true
     - path: data/processed/val.parquet
       hash: md5
-      md5: 1afce79bcbd6617dc44f708b64011caa
-      size: 257744
+      md5: 9acb6b3c014884490a9a076114b49add
+      size: 361516
       isexec: true
     - path: data/simulated_production/production_drift_stream.csv
       hash: md5
-      md5: 80e1d04c5f8d8bebe4486d75578f2f84
-      size: 1151675
+      md5: 224ceba5be90ccde782177bf3b3ade2f
+      size: 1601691
       isexec: true
   train:
     cmd: python src/train.py
@@ -88,13 +88,13 @@ stages:
     deps:
     - path: data/processed/train.parquet
       hash: md5
-      md5: 30211aa4c0c77a1d9021420ef00de041
-      size: 1095430
+      md5: b291784e1ee0af159d11431f93782b48
+      size: 1601020
       isexec: true
     - path: data/simulated_production/production_drift_stream.csv
       hash: md5
-      md5: 80e1d04c5f8d8bebe4486d75578f2f84
-      size: 1151675
+      md5: 224ceba5be90ccde782177bf3b3ade2f
+      size: 1601691
       isexec: true
     - path: models/graph_nc.pt
       hash: md5
@@ -103,17 +103,46 @@ stages:
       isexec: true
     - path: src/evaluate_drift.py
       hash: md5
-      md5: 902cc365ddb76b44a5c54112307167d7
-      size: 5962
+      md5: a3db8e00712db7af7d1a77c42c702667
+      size: 6038
       isexec: true
     outs:
     - path: docs/reports/data_drift_report.html
       hash: md5
-      md5: f91b2bd6a1f598b79bc038f17fd596ec
-      size: 3909220
+      md5: eed57b7ac6c626858bfd77adc10ee8ea
+      size: 3908225
       isexec: true
     - path: docs/reports/data_drift_summary.json
       hash: md5
-      md5: 46d660e5e31ab08b4140ad21ab1e1dc8
-      size: 7016
+      md5: bef84bf6342291e25dd764eaad5afb97
+      size: 7264
+      isexec: true
+  materialize_features:
+    cmd: python src/materialize_feast.py
+    deps:
+    - path: data/processed/train.parquet
+      hash: md5
+      md5: b291784e1ee0af159d11431f93782b48
+      size: 1601020
+      isexec: true
+    - path: feature_store/feature_store.yaml
+      hash: md5
+      md5: 7b99f4e8214266ac68f66493cf2e0a0c
+      size: 719
+      isexec: true
+    - path: feature_store/features.py
+      hash: md5
+      md5: fd2324c01aacbae47e12a8a3d3eede1a
+      size: 2337
+      isexec: true
+    - path: src/materialize_feast.py
+      hash: md5
+      md5: 875bd51b67fbfbd3d6dc471fd97a3aab
+      size: 1793
+      isexec: true
+    outs:
+    - path: data/registry.db
+      hash: md5
+      md5: e5b39fcc51cc6264953301614f8961e7
+      size: 4352
       isexec: true

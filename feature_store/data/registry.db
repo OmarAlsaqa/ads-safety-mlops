@@ -1,0 +1,82 @@
+
+Q
+3
+ipClient IP Address ID"ipJads_safety_features
+¬º‚Ô ­,¬º‚Ô ­,
+L
+.
+appMobile App ID"appJads_safety_features
+¬º‚ÔÈÅÎ/¬º‚ÔÈÅÎ/
+T
+6
+deviceDevice Model ID"deviceJads_safety_features
+¬º‚Ô€ÿ3¬º‚Ô€ÿ3
+g
+I
+channel Marketing / Publisher Channel ID"channelJads_safety_features
+¬º‚Ô˜²˜7¬º‚Ô˜²˜7
+H
+*
+__dummy"
+__dummy_idJads_safety_features
+¬º‚ÔÈş”<¬º‚ÔÈş”<1"$6ae3002a-229f-4d7d-9910-d500e2a89f89*®º‚ÔøĞâO2’
+Ú
+ip_featuresads_safety_featuresip"
+ip_click_count"
+ip_unique_apps2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+ip’latest3
+¬º‚Ôà™„"­º‚ÔøÎúc
+€äÏ¬İ‡Ô ÉüO02ü
+Ã
+app_featuresads_safety_featuresapp"
+app_freq2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+app’latest4
+¬º‚ÔÈûà#­º‚ÔèÖÑò
+€äÏ¬İ‡Ô ÉüO02Œ
+Ó
+channel_featuresads_safety_featureschannel"
+channel_freq2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+channel’latest4
+¬º‚Ô˜†°&­º‚Ô˜Õ–
+€äÏ¬İ‡Ô ÉüO02‡
+Ï
+device_featuresads_safety_featuresdevice"
+device_freq2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+
+device’latest3
+¬º‚ÔØ€”)®º‚Ô°†ÙO
+€äÏ¬İ‡Ô ÉüO0b†event_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetªads_safety_features’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬z;
+ads_safety_features$19388fa6-d3e7-47bc-872b-ba6b7e660441Š3
+
+ads_safety_features
+¬º‚Ô ş³¬º‚Ô ş³’é
+ß
+ip_featuresads_safety_features"feature_view*ù
+Ú
+ip_featuresads_safety_featuresip"
+ip_click_count"
+ip_unique_apps2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+ip’latest
+¬º‚Ôà™„"¬º‚Ôà™„"2¬º‚Ô€œŞ#B$afd0748f-6e1c-424d-9b22-727d25cf03dd
+É
+app_featuresads_safety_features"feature_view*â
+Ã
+app_featuresads_safety_featuresapp"
+app_freq2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+app’latest
+¬º‚ÔÈûà#¬º‚ÔÈûà#2¬º‚ÔĞ¦­&B$30c7ef7f-e687-4f29-ab72-0353aadf57c3
+İ
+channel_featuresads_safety_features"feature_view*ò
+Ó
+channel_featuresads_safety_featureschannel"
+channel_freq2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+channel’latest
+¬º‚Ô˜†°&¬º‚Ô˜†°&2¬º‚Ô°À‘)B$31198d69-1118-4d67-9a56-845172fccb6b
+Ø
+device_featuresads_safety_features"feature_view*î
+Ï
+device_featuresads_safety_featuresdevice"
+device_freq2€õ$:ğevent_timestampZDB/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢B/mnt/d/Projects/fcma/ads-safety-mlops/data/processed/train.parquet’«º‚Ôˆ¤—Æ"¬º‚Ôà–¬@b
+
+device’latest
+¬º‚ÔØ€”)¬º‚ÔØ€”)2¬º‚ÔĞ¦›,B$0e2a6889-3cf4-4eae-a460-936f72a3bfa0

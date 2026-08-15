@@ -94,6 +94,7 @@ def preprocess():
 
     print("3. Feature engineering: Behavioral entity frequencies & temporal dynamics...")
     df["dt"] = pd.to_datetime(df["click_time"])
+    df["event_timestamp"] = df["dt"]
     df["hour"] = df["dt"].dt.hour
     df["day"] = df["dt"].dt.day
     df["date_str"] = df["dt"].dt.strftime("%Y-%m-%d")
@@ -102,11 +103,11 @@ def preprocess():
     df = df.sort_values("dt").reset_index(drop=True)
 
     # Behavioral frequency aggregations
-    df["ip_click_count"] = df.groupby("ip")["app"].transform("count")
-    df["ip_unique_apps"] = df.groupby("ip")["app"].transform("nunique")
-    df["app_freq"] = df.groupby("app")["ip"].transform("count")
-    df["channel_freq"] = df.groupby("channel")["ip"].transform("count")
-    df["device_freq"] = df.groupby("device")["ip"].transform("count")
+    df["ip_click_count"] = df.groupby("ip")["app"].transform("count").astype("float32")
+    df["ip_unique_apps"] = df.groupby("ip")["app"].transform("nunique").astype("float32")
+    df["app_freq"] = df.groupby("app")["ip"].transform("count").astype("float32")
+    df["channel_freq"] = df.groupby("channel")["ip"].transform("count").astype("float32")
+    df["device_freq"] = df.groupby("device")["ip"].transform("count").astype("float32")
 
     print("4. Validating processed dataset with Pandera (ProcessedAdClickSchema)...")
     ProcessedAdClickSchema.validate(df)

@@ -23,6 +23,16 @@ stages:
     outs:
       - models/graph_nc.pt
       - models/training_metrics.json
+  materialize_features:
+    cmd: python src/materialize_feast.py
+    deps:
+      - src/materialize_feast.py
+      - feature_store/features.py
+      - feature_store/feature_store.yaml
+      - data/processed/train.parquet
+    outs:
+      - data/registry.db
+
   evaluate_drift:
     cmd: python src/evaluate_drift.py
     deps:

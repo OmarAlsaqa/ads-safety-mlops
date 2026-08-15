@@ -190,7 +190,17 @@ async def lifespan(app: FastAPI):
     else:
         raise FileNotFoundError(f"Model checkpoint not found at {local_path}. Run training first.")
 
-    # Initialize rolling graph context state (IP frequency tables)
+    # Initialize Feast Feature Store
+    try:
+        from feast import FeatureStore
+        fs_path = os.getenv("FEAST_REPO_PATH", "feature_store")
+        if os.path.exists(fs_path):
+            model_store["feature_store"] = FeatureStore(repo_path=fs_path)
+            print(f"   ✅ Feast Feature Store online retrieval ready from {fs_path}")
+    except Exception as fs_err:
+        print(f"   Notice on Feast Feature Store init: {fs_err}")
+
+    # Initialize rolling graph context state (fallback frequency tables)
     model_store["model"] = model
     model_store["device"] = device
     model_store["threshold"] = threshold
@@ -226,18 +236,54 @@ def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
 
     start_time = time.perf_counter()
 
-    # 1. Update rolling entity frequency states
-    ip_cnt = model_store["ip_counts"].get(click.ip, 1) + 1
-    model_store["ip_counts"][click.ip] = ip_cnt
+    # 1. Fetch enriched online entity features from Feast Feature Store
+    fs = model_store.get("feature_store")
+    ip_cnt = None
+    app_cnt = None
+    chan_cnt = None
+    dev_cnt = None
 
-    app_cnt = model_store["app_counts"].get(click.app, 1) + 1
-    model_store["app_counts"][click.app] = app_cnt
+    if fs is not None:
+        try:
+            response = fs.get_online_features(
+                features=[
+                    "ip_features:ip_click_count",
+                    "ip_features:ip_unique_apps",
+                    "app_features:app_freq",
+                    "channel_features:channel_freq",
+                    "device_features:device_freq",
+                ],
+                entity_rows=[{
+                    "ip": click.ip,
+                    "app": click.app,
+                    "channel": click.channel,
+                    "device": click.device,
+                }],
+            ).to_dict()
+            if response.get("ip_click_count") and response["ip_click_count"][0] is not None:
+                ip_cnt = float(response["ip_click_count"][0])
+            if response.get("app_freq") and response["app_freq"][0] is not None:
+                app_cnt = float(response["app_freq"][0])
+            if response.get("channel_freq") and response["channel_freq"][0] is not None:
+                chan_cnt = float(response["channel_freq"][0])
+            if response.get("device_freq") and response["device_freq"][0] is not None:
+                dev_cnt = float(response["device_freq"][0])
+        except Exception:
+            pass
 
-    chan_cnt = model_store["channel_counts"].get(click.channel, 1) + 1
-    model_store["channel_counts"][click.channel] = chan_cnt
-
-    dev_cnt = model_store["device_counts"].get(click.device, 1) + 1
-    model_store["device_counts"][click.device] = dev_cnt
+    # Fallback to local rolling counter if Feast store is unpopulated
+    if ip_cnt is None:
+        ip_cnt = model_store["ip_counts"].get(click.ip, 1) + 1
+        model_store["ip_counts"][click.ip] = ip_cnt
+    if app_cnt is None:
+        app_cnt = model_store["app_counts"].get(click.app, 1) + 1
+        model_store["app_counts"][click.app] = app_cnt
+    if chan_cnt is None:
+        chan_cnt = model_store["channel_counts"].get(click.channel, 1) + 1
+        model_store["channel_counts"][click.channel] = chan_cnt
+    if dev_cnt is None:
+        dev_cnt = model_store["device_counts"].get(click.device, 1) + 1
+        model_store["device_counts"][click.device] = dev_cnt
 
     # 2. Extract temporal signals
     try:

@@ -1,0 +1,22 @@
+project: ads_safety_features
+registry: ../data/registry.db
+provider: local
+offline_store:
+  type: file
+
+# ==============================================================================
+# Online Store Configuration:
+# Choose between Option A (Redis) and Option B (DynamoDB via Floci Local AWS)
+# ==============================================================================
+
+# Option A: Redis Online Store (Ultra-fast <1ms in-memory key-value)
+online_store:
+  type: redis
+  connection_string: localhost:6379
+
+# Option B: DynamoDB Online Store (Floci AWS Emulation)
+# Uncomment the block below to switch to Floci DynamoDB:
+# online_store:
+#   type: dynamodb
+#   region: us-east-1
+#   endpoint_url: http://localhost:4566

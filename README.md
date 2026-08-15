@@ -11,12 +11,13 @@ An end-to-end Graph Machine Learning MLOps pipeline for digital advertising safe
 4. [🚀 Execution Guide: Running in All Scenarios](#execution-scenarios)
 5. [⚔️ Adversarial Robustness & Stress-Testing Suites](#stress-tests)
 6. [🌊 Multi-Day Streaming & Controlled Drift Experiments](#drift-simulation)
-7. [🌐 Access Endpoints](#access-endpoints)
-8. [📊 Visual Dashboards & UI Screenshots](#visual-dashboards)
-9. [🪣 Using Local S3 Storage & Code Integration](#use-local-s3)
-10. [🛑 Stop / Reset Stack](#stop-reset)
-11. [📚 Technical Documentation & Guides](#documentation)
-12. [📌 Roadmap & Next Steps](#roadmap)
+7. [🍱 Feast Feature Store (Redis & Floci DynamoDB)](#feast-store)
+8. [🌐 Access Endpoints](#access-endpoints)
+9. [📊 Visual Dashboards & UI Screenshots](#visual-dashboards)
+10. [🪣 Using Local S3 Storage & Code Integration](#use-local-s3)
+11. [🛑 Stop / Reset Stack](#stop-reset)
+12. [📚 Technical Documentation & Guides](#documentation)
+13. [📌 Roadmap & Next Steps](#roadmap)
 
 ---
 
@@ -84,7 +85,9 @@ flowchart LR
 
 | Component | Technology | Purpose |
 | --- | --- | --- |
+| **Feature Store (Online/Offline)** | Feast (`:6379` / `:4566`) | Centralized feature registry, point-in-time training joins, and sub-millisecond online entity hydration (Redis & Floci DynamoDB). |
 | **Local S3 Storage** | Floci (`:4566`) | S3-compatible object storage for DVC datasets, graph tensors, model weights, and MLflow artifacts. |
+| **Online Key-Value Store** | Redis (`:6379`) | Ultra-fast in-memory key-value cache powering Feast online entity feature retrieval. |
 | **S3 Management Web UI** | Floci UI (`:8080`) | Visual web console for browsing S3 buckets, folders, and uploaded objects (`s3://mlops-data`). |
 | **Metrics Visualization** | Grafana (`:3000` / `:80`) | Pre-configured dashboards for real-time container, host hardware, prediction traffic, and ML drift metrics. |
 | **Metrics Storage** | Prometheus (`:9090`) | Stores and queries application request rates, prediction latencies, and 8 individual per-feature drift gauges. |
@@ -96,6 +99,7 @@ flowchart LR
 | Component | Technology | Purpose |
 | --- | --- | --- |
 | **Graph Neural Network** | PyTorch Geometric | **GraphNC (ICML 2026)** heterogeneous co-occurrence graph message-passing for ad-fraud detection. |
+| **Feature Store Engine** | Feast (`feast[redis,aws]`) | Unifies offline training feature extraction and online sub-millisecond entity hydration. |
 | **Data Version Control** | DVC (`dvc[s3]`) | Reproducibility engine (`dvc.yaml`) & versioning tool backed by local Floci S3 storage. |
 | **Data Validation** | Pandera | Enforces strict schema types, non-null checks, and empirical boundaries on raw & feature-engineered clicks. |
 | **Experiment Tracking** | MLflow (`:5000`) | Logs parameters, loss curves, PR/ROC curves, and registers champion model `@champion`. |
@@ -161,7 +165,12 @@ stages:
   - **Recall**: **`42.86%`**
   - Serialized checkpoint: `models/graph_nc.pt` registered as `@champion` in MLflow Model Registry.
 
-### 3. Dual-Mode Data Drift Evaluation (`src/evaluate_drift.py`)
+### 3. Feast Feature Store & Online Materialization (`src/materialize_feast.py`)
+- **Offline Point-in-Time Correctness**: Defines Feature Views (`ip_features`, `app_features`, `channel_features`, `device_features`) preventing time-travel data leakage during training.
+- **Online Materialization**: Materializes feature partitions into the low-latency online key-value store (**Option A: Redis** or **Option B: Floci DynamoDB**).
+- **FastAPI Online Hydration**: Enables sub-millisecond ($< 1.5\text{ ms}$) feature vector retrieval during live inference, maintaining persistent state across container restarts and multi-pod NGINX load balancers.
+
+### 4. Dual-Mode Data Drift Evaluation (`src/evaluate_drift.py`)
 - **Evidently 0.7+ Workspace Sync**: Captures report snapshots and pushes them directly into `./workspace/` for the **Evidently UI container (`:8085`)**.
 - **Standalone Visual HTML Report**: Generates complete interactive 4 MB dashboard at `docs/reports/data_drift_report.html`.
 - **Live Telemetry Push**: Extracts 8 individual feature drift scores and pushes them to **FastAPI $\to$ Prometheus $\to$ Grafana**.
@@ -354,6 +363,64 @@ python3 src/test_controlled_drift_experiment.py
 | **Floci S3 Web UI** | `http://localhost:8080` | S3 Object Browser for datasets (`s3://mlops-data`) & model artifacts |
 | **Local S3 Endpoint** | `http://localhost:4566` | AWS S3 API (`Key: test` / `Secret: test` / `Region: us-east-1`) |
 | **Prometheus Metrics** | `http://localhost:9090` | Direct PromQL query browser & target status |
+
+---
+
+<a id="feast-store"></a>
+## 🍱 Feast Feature Store: Redis & Floci DynamoDB Integration
+
+Feast acts as the single source of truth for features across both offline training and online serving.
+
+```mermaid
+flowchart LR
+    subgraph FeastArch["🍱 Feast Feature Store Flow"]
+        Parquet["📁 train.parquet\n(Offline Source)"] --> FeastReg["🍱 Feast Registry\n(feature_store/features.py)"]
+        FeastReg -->|Historical Joins| Train["🏋️ GraphNC Training"]
+        FeastReg -->|feast materialize| StoreChoice{"⚡ Choose Online Store"}
+        StoreChoice -->|Option A| Redis["⚡ Redis Container (:6379)\n(ads_redis: In-Memory <1ms)"]
+        StoreChoice -->|Option B| DynamoDB["⚡ Floci DynamoDB (:4566)\n(Local AWS Emulation)"]
+        Redis --> FastAPI["🚀 FastAPI Engine\n(src/predict.py)"]
+        DynamoDB --> FastAPI
+        FastAPI --> GraphNC["🤖 GraphNC Node Scoring"]
+    end
+```
+
+### Why Feast in Ads Safety?
+1. **Eliminates Training-Serving Skew**: Entity features (`ip_click_count`, `ip_unique_apps`, `app_freq`, `channel_freq`, `device_freq`) are defined once and computed identically for both historical training and live inference.
+2. **State Persistence**: Entity counters survive container restarts and persist across rolling time windows.
+3. **Multi-Pod Scalability**: Distributed online stores (Redis / DynamoDB) ensure that multiple load-balanced FastAPI replicas behind NGINX share unified botnet frequency counters in real-time.
+
+### Choosing Your Online Store Backend (`feature_store/feature_store.yaml`):
+
+#### Option A: Redis Online Store (Recommended - Default)
+* In-memory, ultra-low latency ($< 0.8\text{ ms}$), high throughput ($100\text{k+}$ lookups/sec).
+* Pre-configured in `compose.yml` (`ads_redis:6379`).
+```yaml
+online_store:
+  type: redis
+  connection_string: localhost:6379
+```
+
+#### Option B: DynamoDB Online Store (Floci AWS Emulation)
+* Emulates cloud-native AWS DynamoDB tables on local Floci (`http://localhost:4566`).
+* Switch by updating `feature_store/feature_store.yaml`:
+```yaml
+online_store:
+  type: dynamodb
+  region: us-east-1
+  endpoint_url: http://localhost:4566
+```
+
+### Materializing Features to Online Store:
+```bash
+# 1. Apply feature views and update registry
+cd feature_store
+feast apply
+cd ..
+
+# 2. Materialize latest feature partitions into Online Store (Redis / DynamoDB)
+python3 src/materialize_feast.py
+```
 
 ---
 
