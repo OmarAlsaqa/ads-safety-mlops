@@ -9,12 +9,16 @@ from schema import RawAdClickSchema, ProcessedAdClickSchema
 def build_pyg_graph(df: pd.DataFrame, train_ratio: float = 0.70, val_ratio: float = 0.15) -> Data:
     """
     Constructs a PyTorch Geometric Graph Data Object (T-Finance / GraphNC compatible):
-    - Nodes: Click events with 7 normalized behavioral features
+    - Nodes: Click events with 15 normalized behavioral, temporal delta, and interaction features
     - Edges: Co-occurrence relations across shared IP and App/Channel entities
     - Targets: Binary fraud conversion labels
     - Masks: Chronological train, validation, and test boolean masks
     """
-    feature_cols = ["hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq"]
+    feature_cols = [
+        "hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq",
+        "next_click_delta", "prev_click_delta", "ip_device_os_cumcount", "ip_app_cumcount",
+        "ip_hh_app_count", "ip_hh_device_count", "app_channel_count", "ip_unique_channels"
+    ]
     X_raw = df[feature_cols].values.astype(np.float32)
     X_norm = (X_raw - X_raw.mean(axis=0)) / (X_raw.std(axis=0) + 1e-6)
     x = torch.tensor(X_norm, dtype=torch.float)
@@ -102,12 +106,33 @@ def preprocess():
     # Chronological sort to eliminate temporal leakage
     df = df.sort_values("dt").reset_index(drop=True)
 
-    # Behavioral frequency aggregations
+    # 1. Behavioral frequency aggregations
     df["ip_click_count"] = df.groupby("ip")["app"].transform("count").astype("float32")
     df["ip_unique_apps"] = df.groupby("ip")["app"].transform("nunique").astype("float32")
     df["app_freq"] = df.groupby("app")["ip"].transform("count").astype("float32")
     df["channel_freq"] = df.groupby("channel")["ip"].transform("count").astype("float32")
     df["device_freq"] = df.groupby("device")["ip"].transform("count").astype("float32")
+
+    # 2. Advanced Temporal Deltas & Sequences (Kaggle Insights)
+    # Next click interval in seconds for the same (ip, app, device, os)
+    next_sec = df.groupby(["ip", "app", "device", "os"])["dt"].shift(-1)
+    next_delta = (pd.to_datetime(next_sec) - df["dt"]).dt.total_seconds().fillna(3600.0)
+    df["next_click_delta"] = np.log1p(np.clip(next_delta, 0.0, 86400.0)).astype("float32")
+
+    # Previous click interval in seconds for the same (ip, channel)
+    prev_sec = df.groupby(["ip", "channel"])["dt"].shift(1)
+    prev_delta = (df["dt"] - pd.to_datetime(prev_sec)).dt.total_seconds().fillna(3600.0)
+    df["prev_click_delta"] = np.log1p(np.clip(prev_delta, 0.0, 86400.0)).astype("float32")
+
+    # Cumulative sequential counters
+    df["ip_device_os_cumcount"] = np.log1p(df.groupby(["ip", "device", "os"]).cumcount()).astype("float32")
+    df["ip_app_cumcount"] = np.log1p(df.groupby(["ip", "app"]).cumcount()).astype("float32")
+
+    # 3. High-Order Cross Interactions & Diversity
+    df["ip_hh_app_count"] = df.groupby(["ip", "hour", "app"])["channel"].transform("count").astype("float32")
+    df["ip_hh_device_count"] = df.groupby(["ip", "hour", "device"])["channel"].transform("count").astype("float32")
+    df["app_channel_count"] = df.groupby(["app", "channel"])["ip"].transform("count").astype("float32")
+    df["ip_unique_channels"] = df.groupby("ip")["channel"].transform("nunique").astype("float32")
 
     print("4. Validating processed dataset with Pandera (ProcessedAdClickSchema)...")
     ProcessedAdClickSchema.validate(df)

@@ -239,9 +239,16 @@ def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
     # 1. Fetch enriched online entity features from Feast Feature Store
     fs = model_store.get("feature_store")
     ip_cnt = None
+    ip_uniq_apps = 1.0
+    ip_uniq_chan = 1.0
+    app_cum = 0.0
+    next_delta = 8.19
+    prev_delta = 8.19
     app_cnt = None
+    app_chan_cnt = 10.0
     chan_cnt = None
     dev_cnt = None
+    dev_os_cum = 0.0
 
     if fs is not None:
         try:
@@ -249,9 +256,15 @@ def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
                 features=[
                     "ip_features:ip_click_count",
                     "ip_features:ip_unique_apps",
+                    "ip_features:ip_unique_channels",
+                    "ip_features:ip_app_cumcount",
+                    "ip_features:next_click_delta",
+                    "ip_features:prev_click_delta",
                     "app_features:app_freq",
+                    "app_features:app_channel_count",
                     "channel_features:channel_freq",
                     "device_features:device_freq",
+                    "device_features:ip_device_os_cumcount",
                 ],
                 entity_rows=[{
                     "ip": click.ip,
@@ -262,28 +275,42 @@ def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
             ).to_dict()
             if response.get("ip_click_count") and response["ip_click_count"][0] is not None:
                 ip_cnt = float(response["ip_click_count"][0])
+            if response.get("ip_unique_apps") and response["ip_unique_apps"][0] is not None:
+                ip_uniq_apps = float(response["ip_unique_apps"][0])
+            if response.get("ip_unique_channels") and response["ip_unique_channels"][0] is not None:
+                ip_uniq_chan = float(response["ip_unique_channels"][0])
+            if response.get("ip_app_cumcount") and response["ip_app_cumcount"][0] is not None:
+                app_cum = float(response["ip_app_cumcount"][0])
+            if response.get("next_click_delta") and response["next_click_delta"][0] is not None:
+                next_delta = float(response["next_click_delta"][0])
+            if response.get("prev_click_delta") and response["prev_click_delta"][0] is not None:
+                prev_delta = float(response["prev_click_delta"][0])
             if response.get("app_freq") and response["app_freq"][0] is not None:
                 app_cnt = float(response["app_freq"][0])
+            if response.get("app_channel_count") and response["app_channel_count"][0] is not None:
+                app_chan_cnt = float(response["app_channel_count"][0])
             if response.get("channel_freq") and response["channel_freq"][0] is not None:
                 chan_cnt = float(response["channel_freq"][0])
             if response.get("device_freq") and response["device_freq"][0] is not None:
                 dev_cnt = float(response["device_freq"][0])
+            if response.get("ip_device_os_cumcount") and response["ip_device_os_cumcount"][0] is not None:
+                dev_os_cum = float(response["ip_device_os_cumcount"][0])
         except Exception:
             pass
 
     # Fallback to local rolling counter if Feast store is unpopulated
     if ip_cnt is None:
-        ip_cnt = model_store["ip_counts"].get(click.ip, 1) + 1
-        model_store["ip_counts"][click.ip] = ip_cnt
+        ip_cnt = float(model_store["ip_counts"].get(click.ip, 1) + 1)
+        model_store["ip_counts"][click.ip] = int(ip_cnt)
     if app_cnt is None:
-        app_cnt = model_store["app_counts"].get(click.app, 1) + 1
-        model_store["app_counts"][click.app] = app_cnt
+        app_cnt = float(model_store["app_counts"].get(click.app, 1) + 1)
+        model_store["app_counts"][click.app] = int(app_cnt)
     if chan_cnt is None:
-        chan_cnt = model_store["channel_counts"].get(click.channel, 1) + 1
-        model_store["channel_counts"][click.channel] = chan_cnt
+        chan_cnt = float(model_store["channel_counts"].get(click.channel, 1) + 1)
+        model_store["channel_counts"][click.channel] = int(chan_cnt)
     if dev_cnt is None:
-        dev_cnt = model_store["device_counts"].get(click.device, 1) + 1
-        model_store["device_counts"][click.device] = dev_cnt
+        dev_cnt = float(model_store["device_counts"].get(click.device, 1) + 1)
+        model_store["device_counts"][click.device] = int(dev_cnt)
 
     # 2. Extract temporal signals
     try:
@@ -291,14 +318,22 @@ def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
     except Exception:
         dt = datetime.utcnow()
 
-    hour = dt.hour
-    day = dt.day
+    hour = float(dt.hour)
+    day = float(dt.day)
 
-    # 3. Assemble normalized feature vector [7 features]
-    raw_feats = np.array([hour, day, ip_cnt, 1, app_cnt, chan_cnt, dev_cnt], dtype=np.float32)
+    ip_hh_app = min(ip_cnt, 10.0)
+    ip_hh_dev = min(ip_cnt, 20.0)
+
+    # 3. Assemble normalized feature vector [15 features]
+    raw_feats = np.array([
+        hour, day, ip_cnt, ip_uniq_apps, app_cnt, chan_cnt, dev_cnt,
+        next_delta, prev_delta, dev_os_cum, app_cum,
+        ip_hh_app, ip_hh_dev, app_chan_cnt, ip_uniq_chan
+    ], dtype=np.float32)
+
     # Standardize with approximate dataset statistics
-    means = np.array([9.0, 7.0, 50.0, 2.0, 100.0, 50.0, 500.0], dtype=np.float32)
-    stds = np.array([6.0, 1.0, 150.0, 3.0, 250.0, 100.0, 1000.0], dtype=np.float32)
+    means = np.array([9.0, 7.0, 50.0, 2.0, 100.0, 50.0, 500.0, 7.0, 7.0, 0.5, 0.5, 3.0, 5.0, 15.0, 2.0], dtype=np.float32)
+    stds = np.array([6.0, 1.0, 150.0, 3.0, 250.0, 100.0, 1000.0, 3.0, 3.0, 1.5, 1.5, 10.0, 20.0, 40.0, 3.0], dtype=np.float32)
     x_norm = (raw_feats - means) / (stds + 1e-6)
 
     x_tensor = torch.tensor(x_norm, dtype=torch.float).unsqueeze(0).to(device)

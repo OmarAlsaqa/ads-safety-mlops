@@ -32,7 +32,11 @@ def evaluate_drift():
     prod_df = pd.read_csv(prod_path)
 
     # Select behavioral, graph-derived and target features (excluding high-cardinality raw IDs like ip)
-    eval_cols = ["hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq"]
+    eval_cols = [
+        "hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq",
+        "next_click_delta", "prev_click_delta", "ip_device_os_cumcount", "ip_app_cumcount",
+        "ip_hh_app_count", "ip_hh_device_count", "app_channel_count", "ip_unique_channels"
+    ]
     if "is_attributed" in ref_df.columns and "is_attributed" in prod_df.columns:
         eval_cols.append("is_attributed")
 

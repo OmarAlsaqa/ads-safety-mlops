@@ -55,6 +55,10 @@ ip_features_view = FeatureView(
     schema=[
         Field(name="ip_click_count", dtype=Float32),
         Field(name="ip_unique_apps", dtype=Float32),
+        Field(name="ip_unique_channels", dtype=Float32),
+        Field(name="ip_app_cumcount", dtype=Float32),
+        Field(name="next_click_delta", dtype=Float32),
+        Field(name="prev_click_delta", dtype=Float32),
     ],
     online=True,
     source=source,
@@ -66,6 +70,7 @@ app_features_view = FeatureView(
     ttl=timedelta(days=7),
     schema=[
         Field(name="app_freq", dtype=Float32),
+        Field(name="app_channel_count", dtype=Float32),
     ],
     online=True,
     source=source,
@@ -88,6 +93,7 @@ device_features_view = FeatureView(
     ttl=timedelta(days=7),
     schema=[
         Field(name="device_freq", dtype=Float32),
+        Field(name="ip_device_os_cumcount", dtype=Float32),
     ],
     online=True,
     source=source,

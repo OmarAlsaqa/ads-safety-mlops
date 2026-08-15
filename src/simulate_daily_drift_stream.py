@@ -34,7 +34,11 @@ def run_daily_drift_simulation():
 
     # 1. Load Reference Training Data
     ref_df = pd.read_parquet(ref_path)
-    eval_cols = ["hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq"]
+    eval_cols = [
+        "hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq",
+        "next_click_delta", "prev_click_delta", "ip_device_os_cumcount", "ip_app_cumcount",
+        "ip_hh_app_count", "ip_hh_device_count", "app_channel_count", "ip_unique_channels"
+    ]
     if "is_attributed" in ref_df.columns:
         eval_cols.append("is_attributed")
     ref_data = ref_df[eval_cols]
@@ -42,22 +46,36 @@ def run_daily_drift_simulation():
     # 2. Load and Preprocess Chronological Stream Data
     raw_df = pd.read_csv(raw_path)
     raw_df["click_time"] = pd.to_datetime(raw_df["click_time"])
+    raw_df["dt"] = raw_df["click_time"]
     raw_df["date_str"] = raw_df["click_time"].dt.strftime("%Y-%m-%d")
     raw_df["hour"] = raw_df["click_time"].dt.hour
     raw_df["day"] = raw_df["click_time"].dt.day
+    raw_df = raw_df.sort_values("dt").reset_index(drop=True)
 
-    # Compute rolling feature counts
-    ip_counts = raw_df["ip"].value_counts()
-    app_counts = raw_df["app"].value_counts()
-    chan_counts = raw_df["channel"].value_counts()
-    dev_counts = raw_df["device"].value_counts()
-    ip_app_counts = raw_df.groupby("ip")["app"].nunique()
+    # Compute rolling behavioral feature counts
+    raw_df["ip_click_count"] = raw_df.groupby("ip")["app"].transform("count").astype("float32")
+    raw_df["ip_unique_apps"] = raw_df.groupby("ip")["app"].transform("nunique").astype("float32")
+    raw_df["app_freq"] = raw_df.groupby("app")["ip"].transform("count").astype("float32")
+    raw_df["channel_freq"] = raw_df.groupby("channel")["ip"].transform("count").astype("float32")
+    raw_df["device_freq"] = raw_df.groupby("device")["ip"].transform("count").astype("float32")
 
-    raw_df["ip_click_count"] = raw_df["ip"].map(ip_counts).fillna(1)
-    raw_df["ip_unique_apps"] = raw_df["ip"].map(ip_app_counts).fillna(1)
-    raw_df["app_freq"] = raw_df["app"].map(app_counts).fillna(1)
-    raw_df["channel_freq"] = raw_df["channel"].map(chan_counts).fillna(1)
-    raw_df["device_freq"] = raw_df["device"].map(dev_counts).fillna(1)
+    # Advanced Temporal Deltas & Sequences
+    next_sec = raw_df.groupby(["ip", "app", "device", "os"])["dt"].shift(-1)
+    next_delta = (pd.to_datetime(next_sec) - raw_df["dt"]).dt.total_seconds().fillna(3600.0)
+    raw_df["next_click_delta"] = np.log1p(np.clip(next_delta, 0.0, 86400.0)).astype("float32")
+
+    prev_sec = raw_df.groupby(["ip", "channel"])["dt"].shift(1)
+    prev_delta = (raw_df["dt"] - pd.to_datetime(prev_sec)).dt.total_seconds().fillna(3600.0)
+    raw_df["prev_click_delta"] = np.log1p(np.clip(prev_delta, 0.0, 86400.0)).astype("float32")
+
+    raw_df["ip_device_os_cumcount"] = np.log1p(raw_df.groupby(["ip", "device", "os"]).cumcount()).astype("float32")
+    raw_df["ip_app_cumcount"] = np.log1p(raw_df.groupby(["ip", "app"]).cumcount()).astype("float32")
+
+    # High-Order Cross Interactions & Diversity
+    raw_df["ip_hh_app_count"] = raw_df.groupby(["ip", "hour", "app"])["channel"].transform("count").astype("float32")
+    raw_df["ip_hh_device_count"] = raw_df.groupby(["ip", "hour", "device"])["channel"].transform("count").astype("float32")
+    raw_df["app_channel_count"] = raw_df.groupby(["app", "channel"])["ip"].transform("count").astype("float32")
+    raw_df["ip_unique_channels"] = raw_df.groupby("ip")["channel"].transform("nunique").astype("float32")
 
     unique_days = sorted(raw_df["date_str"].unique())
     print(f"Total Chronological Days in Dataset ({len(unique_days)} days): {unique_days}\n")

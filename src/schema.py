@@ -34,11 +34,23 @@ class ProcessedAdClickSchema(pa.DataFrameModel):
     day: Series[int] = pa.Field(ge=1, le=31, nullable=False)
 
     # Behavioral Entity Frequencies & Aggregations
-    ip_click_count: Series[int] = pa.Field(ge=1, nullable=False)
-    ip_unique_apps: Series[int] = pa.Field(ge=1, nullable=False)
-    app_freq: Series[int] = pa.Field(ge=1, nullable=False)
-    channel_freq: Series[int] = pa.Field(ge=1, nullable=False)
-    device_freq: Series[int] = pa.Field(ge=1, nullable=False)
+    ip_click_count: Series[float] = pa.Field(ge=1.0, nullable=False)
+    ip_unique_apps: Series[float] = pa.Field(ge=1.0, nullable=False)
+    app_freq: Series[float] = pa.Field(ge=1.0, nullable=False)
+    channel_freq: Series[float] = pa.Field(ge=1.0, nullable=False)
+    device_freq: Series[float] = pa.Field(ge=1.0, nullable=False)
+
+    # Advanced Temporal Deltas & Sequences (Kaggle Insights)
+    next_click_delta: Series[float] = pa.Field(ge=0.0, nullable=False)
+    prev_click_delta: Series[float] = pa.Field(ge=0.0, nullable=False)
+    ip_device_os_cumcount: Series[float] = pa.Field(ge=0.0, nullable=False)
+    ip_app_cumcount: Series[float] = pa.Field(ge=0.0, nullable=False)
+
+    # High-Order Cross Interactions & Diversity
+    ip_hh_app_count: Series[float] = pa.Field(ge=1.0, nullable=False)
+    ip_hh_device_count: Series[float] = pa.Field(ge=1.0, nullable=False)
+    app_channel_count: Series[float] = pa.Field(ge=1.0, nullable=False)
+    ip_unique_channels: Series[float] = pa.Field(ge=1.0, nullable=False)
 
     # Binary Classification Target (0: Non-attributed / spam, 1: Legitimate converted install)
     is_attributed: Series[int] = pa.Field(isin=[0, 1], nullable=False)
