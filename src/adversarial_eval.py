@@ -23,7 +23,14 @@ try:
 except ImportError:
     from models.graph_nc import GraphNC
 
+from torch_geometric.data import Data
+try:
+    from torch_geometric.loader import NeighborLoader
+except ImportError:
+    from torch_geometric.data import NeighborLoader
+
 # Local S3 and MLflow environment configuration
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:4566")
 os.environ["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID", "test")
 os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -53,9 +60,41 @@ def apply_feature_jitter_attack(x: torch.Tensor, noise_std: float) -> torch.Tens
     return x + noise
 
 
-def evaluate_adversarial_robustness():
+def evaluate_model_batched(model, data, edge_index=None, x=None, mask=None, device="cuda") -> np.ndarray:
+    """Evaluates GraphNC via scalable mini-batches to prevent GPU OOM on large graphs."""
+    model.eval()
+    curr_x = (x if x is not None else data.x).cpu().contiguous()
+    curr_edges = (edge_index if edge_index is not None else data.edge_index).cpu().contiguous()
+    curr_mask = (mask if mask is not None else data.test_mask).cpu().contiguous()
+    curr_x_cat = getattr(data, "x_cat", None)
+    if curr_x_cat is not None:
+        curr_x_cat = curr_x_cat.cpu().contiguous()
+
+    temp_data = Data(x=curr_x, edge_index=curr_edges, test_mask=curr_mask, x_cat=curr_x_cat)
+    batch_size = 65536 if temp_data.num_nodes >= 1000000 else 16384
+    loader = NeighborLoader(
+        temp_data,
+        num_neighbors=[15, 10],
+        batch_size=batch_size,
+        input_nodes=temp_data.test_mask,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    preds = []
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            b_x_cat = getattr(batch, "x_cat", None)
+            p = model(batch.x, batch.edge_index, x_cat=b_x_cat)[:batch.batch_size]
+            preds.append(p.cpu().numpy())
+
+    return np.concatenate(preds)
+
+
+def run_adversarial_benchmark():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🛡️ Running GraphNC Adversarial Evasion Benchmarks on: {device}")
+    print(f"🛡️ Running GraphNC Adversarial Robustness & Evasion Benchmark on {device}...")
 
     # 1. MLflow Experiment Setup
     mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
@@ -77,14 +116,18 @@ def evaluate_adversarial_robustness():
     if not os.path.exists(graph_path) or not os.path.exists(model_path):
         raise FileNotFoundError("Missing graph tensor or model checkpoint. Run 'dvc repro' first.")
 
-    data = torch.load(graph_path, weights_only=False).to(device)
+    data = torch.load(graph_path, weights_only=False)
+    data.x = data.x.contiguous()
+    data.edge_index = data.edge_index.contiguous()
+    data.y = data.y.contiguous()
+    data.test_mask = data.test_mask.contiguous()
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
     hyperparams = checkpoint.get("hyperparams", {})
-    threshold = checkpoint.get("threshold", 0.6566)
+    threshold = checkpoint.get("threshold", 0.5)
 
     model = GraphNC(
-        in_dim=hyperparams.get("in_dim", 7),
+        in_dim=hyperparams.get("in_dim", data.num_features),
         hidden_dim=hyperparams.get("hidden_dim", 64),
         readout=hyperparams.get("readout", "avg"),
         beta=hyperparams.get("beta", 0.5),
@@ -97,12 +140,11 @@ def evaluate_adversarial_robustness():
     pos_ratio = float((data.y == 1).float().mean().item())
 
     # 3. Clean Baseline Evaluation (Day 4 Test Set)
-    with torch.no_grad():
-        clean_probs = model(data.x, data.edge_index)[data.test_mask].cpu().numpy()
-        clean_auc = float(roc_auc_score(test_y, clean_probs))
-        clean_pr_auc = float(average_precision_score(test_y, clean_probs))
-        clean_preds = (clean_probs >= threshold).astype(int)
-        clean_f1 = float(f1_score(test_y, clean_preds, zero_division=0))
+    clean_probs = evaluate_model_batched(model, data, device=device)
+    clean_auc = float(roc_auc_score(test_y, clean_probs))
+    clean_pr_auc = float(average_precision_score(test_y, clean_probs))
+    clean_preds = (clean_probs >= threshold).astype(int)
+    clean_f1 = float(f1_score(test_y, clean_preds, zero_division=0))
 
     print(f"\n📊 Baseline (Clean Traffic - 0% Perturbation):\n"
           f"   - Clean AUC-ROC: {clean_auc:.4f} | Clean PR-AUC: {clean_pr_auc:.4f} | F1: {clean_f1:.4f}")
@@ -126,12 +168,11 @@ def evaluate_adversarial_robustness():
 
     for drop_rate in edge_drop_levels:
         perturbed_edges = apply_edge_dropping_attack(data.edge_index, drop_rate)
-        with torch.no_grad():
-            pert_probs = model(data.x, perturbed_edges)[data.test_mask].cpu().numpy()
-            pert_auc = float(roc_auc_score(test_y, pert_probs))
-            pert_pr_auc = float(average_precision_score(test_y, pert_probs))
-            pert_preds = (pert_probs >= threshold).astype(int)
-            pert_f1 = float(f1_score(test_y, pert_preds, zero_division=0))
+        pert_probs = evaluate_model_batched(model, data, edge_index=perturbed_edges, device=device)
+        pert_auc = float(roc_auc_score(test_y, pert_probs))
+        pert_pr_auc = float(average_precision_score(test_y, pert_probs))
+        pert_preds = (pert_probs >= threshold).astype(int)
+        pert_f1 = float(f1_score(test_y, pert_preds, zero_division=0))
 
         degradation = clean_auc - pert_auc
         print(f"   [Drop {int(drop_rate*100):02d}% Edges] AUC-ROC: {pert_auc:.4f} (Δ -{degradation:.4f}) | PR-AUC: {pert_pr_auc:.4f} | F1: {pert_f1:.4f}")
@@ -152,12 +193,11 @@ def evaluate_adversarial_robustness():
 
     for noise_std in noise_levels:
         perturbed_x = apply_feature_jitter_attack(data.x, noise_std)
-        with torch.no_grad():
-            pert_probs = model(perturbed_x, data.edge_index)[data.test_mask].cpu().numpy()
-            pert_auc = float(roc_auc_score(test_y, pert_probs))
-            pert_pr_auc = float(average_precision_score(test_y, pert_probs))
-            pert_preds = (pert_probs >= threshold).astype(int)
-            pert_f1 = float(f1_score(test_y, pert_preds, zero_division=0))
+        pert_probs = evaluate_model_batched(model, data, x=perturbed_x, device=device)
+        pert_auc = float(roc_auc_score(test_y, pert_probs))
+        pert_pr_auc = float(average_precision_score(test_y, pert_probs))
+        pert_preds = (pert_probs >= threshold).astype(int)
+        pert_f1 = float(f1_score(test_y, pert_preds, zero_division=0))
 
         degradation = clean_auc - pert_auc
         print(f"   [Noise σ = {noise_std:.2f}] AUC-ROC: {pert_auc:.4f} (Δ -{degradation:.4f}) | PR-AUC: {pert_pr_auc:.4f} | F1: {pert_f1:.4f}")
@@ -240,4 +280,4 @@ def evaluate_adversarial_robustness():
 
 
 if __name__ == "__main__":
-    evaluate_adversarial_robustness()
+    run_adversarial_benchmark()

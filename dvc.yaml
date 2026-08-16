@@ -4,7 +4,7 @@ stages:
     deps:
       - src/preprocess.py
       - src/schema.py
-      - data/raw/train_sample.csv
+      - data/raw/train.csv
     outs:
       - data/processed/train.parquet
       - data/processed/val.parquet

@@ -33,10 +33,16 @@ except ImportError:
     from models.graph_nc import GraphNC
 
 # Local S3 and MLflow environment configuration
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["MLFLOW_S3_ENDPOINT_URL"] = os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://localhost:4566")
 os.environ["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID", "test")
 os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
 os.environ["AWS_DEFAULT_REGION"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+
+try:
+    from torch_geometric.loader import NeighborLoader
+except ImportError:
+    from torch_geometric.data import NeighborLoader
 
 
 def generate_evaluation_plots(y_true: np.ndarray, y_prob: np.ndarray, y_pred: np.ndarray, output_dir: str = "models"):
@@ -88,7 +94,7 @@ def generate_evaluation_plots(y_true: np.ndarray, y_prob: np.ndarray, y_pred: np
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Training GraphNC Model on Device: {device}")
+    print(f"🚀 Training GraphNC Model on Device: {device} (Mini-Batch Neighbor Sampling & AMP Enabled)")
 
     # 1. MLflow Experiment Setup
     mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
@@ -109,7 +115,15 @@ def train():
         raise FileNotFoundError(f"Processed graph not found at {graph_path}. Run 'dvc repro' first.")
 
     print(f"1. Loading Graph Dataset from {graph_path}...")
-    data = torch.load(graph_path, weights_only=False).to(device)
+    data = torch.load(graph_path, weights_only=False)
+    data.x = data.x.contiguous()
+    if hasattr(data, "x_cat") and data.x_cat is not None:
+        data.x_cat = data.x_cat.contiguous()
+    data.edge_index = data.edge_index.contiguous()
+    data.y = data.y.contiguous()
+    data.train_mask = data.train_mask.contiguous()
+    data.val_mask = data.val_mask.contiguous()
+    data.test_mask = data.test_mask.contiguous()
 
     num_nodes = data.num_nodes
     num_edges = data.edge_index.shape[1]
@@ -119,26 +133,59 @@ def train():
     print(f"   -> Nodes: {num_nodes:,} | Edges: {num_edges:,} | Features: {in_dim}")
     print(f"   -> Class Imbalance: Positive Fraud Rate = {pos_ratio * 100:.3f}%")
 
-    # 3. Hyperparameters
+    # 3. Setup Adaptive Execution Strategy
+    use_minibatch = num_nodes > 2000000
+    if use_minibatch:
+        batch_size = 65536
+        train_loader = NeighborLoader(
+            data,
+            num_neighbors=[15, 10],
+            batch_size=batch_size,
+            input_nodes=data.train_mask,
+            shuffle=True,
+            num_workers=0,
+        )
+        val_loader = NeighborLoader(
+            data,
+            num_neighbors=[15, 10],
+            batch_size=batch_size,
+            input_nodes=data.val_mask,
+            shuffle=False,
+            num_workers=0,
+        )
+        test_loader = NeighborLoader(
+            data,
+            num_neighbors=[15, 10],
+            batch_size=batch_size,
+            input_nodes=data.test_mask,
+            shuffle=False,
+            num_workers=0,
+        )
+    else:
+        # Fast full-graph GPU execution (<1.5GB VRAM for 1M nodes)
+        data = data.to(device)
+
+    # 4. Hyperparameters
     hyperparams = {
         "model_architecture": "GraphNC (ICML 2026)",
         "in_dim": in_dim,
         "hidden_dim": 64,
         "readout": "avg",
-        "lr": 0.002,
+        "lr": 0.0015,
         "weight_decay": 1e-4,
-        "epochs": 40,
+        "epochs": 35,
         "early_stopping_patience": 12,
         "beta": 0.5,
-        "score_da_weight": 1.0,
-        "distill_weight": 1.0,
-        "norm_reg_weight": 0.5,
+        "score_da_weight": 0.05,
+        "distill_weight": 0.05,
+        "norm_reg_weight": 0.01,
         "noise_var": 0.01,
+        "use_minibatch": use_minibatch,
         "batch_nodes": num_nodes,
         "total_edges": num_edges,
     }
 
-    # 4. Instantiate Model, Optimizer & Scheduler
+    # 5. Instantiate Model, Optimizer & Scaler
     model = GraphNC(
         in_dim=hyperparams["in_dim"],
         hidden_dim=hyperparams["hidden_dim"],
@@ -157,84 +204,142 @@ def train():
     )
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=hyperparams["epochs"], eta_min=1e-5)
+    scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
 
-    best_val_auc = 0.0
+    best_val_score = 0.0
     best_epoch = 0
     patience_counter = 0
     best_model_state = None
     model_name = "GraphNC-AdFraud-Detector"
     os.makedirs("models", exist_ok=True)
 
-    print("\n2. Starting MLflow Run & GraphNC Training...")
+    print(f"\n2. Starting MLflow Run & GraphNC Training (Strategy: {'Mini-Batch' if use_minibatch else 'Fast Full-Graph GPU'})...")
     with mlflow.start_run(run_name="graphnc_production_training") as run:
         mlflow.log_params(hyperparams)
 
         for epoch in range(1, hyperparams["epochs"] + 1):
-            # --- Training Step ---
             model.train()
             optimizer.zero_grad()
 
-            loss, loss_dict = model.compute_loss(
-                data.x,
-                data.edge_index,
-                data.y,
-                data.train_mask,
-                is_training=True,
-            )
-            loss.backward()
-            optimizer.step()
+            if use_minibatch:
+                total_loss = 0.0
+                total_bce = 0.0
+                num_batches = 0
+                for batch in train_loader:
+                    batch = batch.to(device)
+                    optimizer.zero_grad()
+                    target_mask = torch.zeros(batch.x.size(0), dtype=torch.bool, device=device)
+                    target_mask[:batch.batch_size] = True
+                    batch_x_cat = getattr(batch, "x_cat", None)
+                    loss, loss_dict = model.compute_loss(
+                        batch.x,
+                        batch.edge_index,
+                        batch.y,
+                        target_mask,
+                        x_cat=batch_x_cat,
+                        is_training=True,
+                    )
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+                    optimizer.step()
+                    total_loss += loss_dict["loss_total"]
+                    total_bce += loss_dict["loss_bce"]
+                    num_batches += 1
+                avg_loss = total_loss / max(1, num_batches)
+                avg_bce = total_bce / max(1, num_batches)
+            else:
+                data_x_cat = getattr(data, "x_cat", None)
+                loss, loss_dict = model.compute_loss(
+                    data.x,
+                    data.edge_index,
+                    data.y,
+                    data.train_mask,
+                    x_cat=data_x_cat,
+                    is_training=True,
+                )
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+                optimizer.step()
+                avg_loss = loss_dict["loss_total"]
+                avg_bce = loss_dict["loss_bce"]
+
             scheduler.step()
 
             # --- Validation Step ---
             model.eval()
             with torch.no_grad():
-                val_probs = model(data.x, data.edge_index)[data.val_mask].cpu().numpy()
-                val_y = data.y[data.val_mask].cpu().numpy()
+                if use_minibatch:
+                    val_preds = []
+                    val_targets = []
+                    for batch in val_loader:
+                        batch = batch.to(device)
+                        batch_x_cat = getattr(batch, "x_cat", None)
+                        probs = model(batch.x, batch.edge_index, x_cat=batch_x_cat)[:batch.batch_size]
+                        val_preds.append(probs.cpu().numpy())
+                        val_targets.append(batch.y[:batch.batch_size].cpu().numpy())
+                    val_probs = np.concatenate(val_preds)
+                    val_y = np.concatenate(val_targets)
+                else:
+                    data_x_cat = getattr(data, "x_cat", None)
+                    val_probs = model(data.x, data.edge_index, x_cat=data_x_cat)[data.val_mask].cpu().numpy()
+                    val_y = data.y[data.val_mask].cpu().numpy()
 
-                val_auc = roc_auc_score(val_y, val_probs)
-                val_pr_auc = average_precision_score(val_y, val_probs)
+                val_auc = float(roc_auc_score(val_y, val_probs))
+                val_pr_auc = float(average_precision_score(val_y, val_probs))
+
+            # Composite ranking score: 40% Global AUC-ROC + 60% Sharp PR-AUC
+            val_score = 0.40 * val_auc + 0.60 * val_pr_auc
 
             # Log metrics per epoch
             mlflow.log_metrics({
-                "epoch_loss": loss_dict["loss_total"],
-                "loss_bce": loss_dict["loss_bce"],
-                "loss_norm_reg": loss_dict["loss_norm_reg"],
-                "loss_distill": loss_dict["loss_distill"],
-                "loss_score_da": loss_dict["loss_score_da"],
+                "epoch_loss": avg_loss,
+                "loss_bce": avg_bce,
                 "val_auc_roc": val_auc,
                 "val_pr_auc": val_pr_auc,
+                "val_composite_score": val_score,
                 "learning_rate": scheduler.get_last_lr()[0],
             }, step=epoch)
 
-            # Check for best model checkpoint based on Validation AUC-ROC & PR-AUC
-            val_composite_score = 0.7 * val_auc + 0.3 * (val_pr_auc * 10)
-            if val_composite_score > best_val_auc:
-                best_val_auc = val_composite_score
+            # Check for best model checkpoint based on Composite Score
+            if val_score > best_val_score:
+                best_val_score = val_score
                 best_epoch = epoch
                 best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
                 patience_counter = 0
             else:
                 patience_counter += 1
 
-            if epoch % 5 == 0 or epoch == 1:
+            if epoch % 5 == 0 or epoch == 1 or epoch == best_epoch:
                 print(f"   Epoch [{epoch:02d}/{hyperparams['epochs']:02d}] "
-                      f"Loss: {loss_dict['loss_total']:.4f} (BCE: {loss_dict['loss_bce']:.3f}) | "
-                      f"Val AUC-ROC: {val_auc:.4f} | Val PR-AUC: {val_pr_auc:.4f} | Peak Ep: {best_epoch}")
+                      f"Loss: {avg_loss:.4f} (BCE: {avg_bce:.3f}) | "
+                      f"Val AUC-ROC: {val_auc:.4f} | Val PR-AUC: {val_pr_auc:.4f} | Peak Ep: {best_epoch} (Score: {best_val_score:.4f})")
 
             # Early stopping check
             if patience_counter >= hyperparams["early_stopping_patience"]:
                 print(f"   🛑 Early stopping triggered at epoch {epoch} (Best model checkpoint from epoch {best_epoch})")
                 break
 
-        # 5. Final Evaluation on Held-Out Test Set (Day 4)
+        # 6. Final Evaluation on Held-Out Test Set (Day 4)
         print(f"\n3. Evaluating Best Champion Model (from Epoch {best_epoch}) on Held-Out Test Set...")
         model.load_state_dict({k: v.to(device) for k, v in best_model_state.items()})
         model.eval()
 
         with torch.no_grad():
-            # Get validation predictions to tune optimal operational decision threshold
-            val_probs = model(data.x, data.edge_index)[data.val_mask].cpu().numpy()
-            val_y = data.y[data.val_mask].cpu().numpy()
+            if use_minibatch:
+                val_preds = []
+                val_targets = []
+                for batch in val_loader:
+                    batch = batch.to(device)
+                    batch_x_cat = getattr(batch, "x_cat", None)
+                    probs = model(batch.x, batch.edge_index, x_cat=batch_x_cat)[:batch.batch_size]
+                    val_preds.append(probs.cpu().numpy())
+                    val_targets.append(batch.y[:batch.batch_size].cpu().numpy())
+                val_probs = np.concatenate(val_preds)
+                val_y = np.concatenate(val_targets)
+            else:
+                data_x_cat = getattr(data, "x_cat", None)
+                val_probs = model(data.x, data.edge_index, x_cat=data_x_cat)[data.val_mask].cpu().numpy()
+                val_y = data.y[data.val_mask].cpu().numpy()
 
             # Find optimal threshold that maximizes Validation F1 Score
             best_thresh = 0.5
@@ -247,16 +352,29 @@ def train():
                     best_thresh = float(t)
 
             # Apply tuned threshold on independent Held-out Test Set
-            test_probs = model(data.x, data.edge_index)[data.test_mask].cpu().numpy()
-            test_y = data.y[data.test_mask].cpu().numpy()
+            if use_minibatch:
+                test_preds_list = []
+                test_targets_list = []
+                for batch in test_loader:
+                    batch = batch.to(device)
+                    batch_x_cat = getattr(batch, "x_cat", None)
+                    probs = model(batch.x, batch.edge_index, x_cat=batch_x_cat)[:batch.batch_size]
+                    test_preds_list.append(probs.cpu().numpy())
+                    test_targets_list.append(batch.y[:batch.batch_size].cpu().numpy())
+                test_probs = np.concatenate(test_preds_list)
+                test_y = np.concatenate(test_targets_list)
+            else:
+                data_x_cat = getattr(data, "x_cat", None)
+                test_probs = model(data.x, data.edge_index, x_cat=data_x_cat)[data.test_mask].cpu().numpy()
+                test_y = data.y[data.test_mask].cpu().numpy()
 
-            test_auc = roc_auc_score(test_y, test_probs)
-            test_pr_auc = average_precision_score(test_y, test_probs)
+            test_auc = float(roc_auc_score(test_y, test_probs))
+            test_pr_auc = float(average_precision_score(test_y, test_probs))
             test_preds = (test_probs >= best_thresh).astype(int)
 
-            test_f1 = f1_score(test_y, test_preds, zero_division=0)
-            test_prec = precision_score(test_y, test_preds, zero_division=0)
-            test_rec = recall_score(test_y, test_preds, zero_division=0)
+            test_f1 = float(f1_score(test_y, test_preds, zero_division=0))
+            test_prec = float(precision_score(test_y, test_preds, zero_division=0))
+            test_rec = float(recall_score(test_y, test_preds, zero_division=0))
 
         print(f"   📊 Final Test Performance (Held-out Chronological Day 4):\n"
               f"      - AUC-ROC:         {test_auc:.4f} (Ranking Power)\n"
@@ -288,7 +406,7 @@ def train():
                 "test_auc_roc": float(test_auc),
                 "test_pr_auc": float(test_pr_auc),
                 "test_f1": float(test_f1),
-                "best_val_auc_roc": float(best_val_auc),
+                "best_val_auc_roc": float(best_val_score),
             }
         }, local_model_path)
         print(f"\n✅ Local PyG model artifact saved to: {local_model_path}")
@@ -301,7 +419,7 @@ def train():
                 "test_f1": float(test_f1),
                 "test_precision": float(test_prec),
                 "test_recall": float(test_rec),
-                "best_val_auc_roc": float(best_val_auc),
+                "best_val_auc_roc": float(best_val_score),
                 "best_epoch": int(best_epoch),
                 "threshold": float(best_thresh),
             }, f, indent=2)

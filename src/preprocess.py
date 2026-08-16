@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -23,27 +24,53 @@ def build_pyg_graph(df: pd.DataFrame, train_ratio: float = 0.70, val_ratio: floa
     X_norm = (X_raw - X_raw.mean(axis=0)) / (X_raw.std(axis=0) + 1e-6)
     x = torch.tensor(X_norm, dtype=torch.float)
 
-    # 1. Build Co-occurrence Edges
+    # Categorical entity matrix for learnable embeddings (app, channel, device, os, hour)
+    cat_cols = ["app", "channel", "device", "os", "hour"]
+    x_cat = torch.tensor(df[cat_cols].values.astype(np.int64), dtype=torch.long)
+
+    # 1. Build Multi-Relational Co-occurrence Edges
     src_list = []
     dst_list = []
 
-    # Relation 1: Shared IP
-    ip_groups = df.groupby("ip").groups
-    for _, indices in ip_groups.items():
-        idx_arr = list(indices)
-        if len(idx_arr) > 1:
-            for i in range(len(idx_arr) - 1):
-                src_list.extend([idx_arr[i], idx_arr[i + 1]])
-                dst_list.extend([idx_arr[i + 1], idx_arr[i]])
+    # Relation 1: Shared IP (connect consecutive clicks per IP)
+    ip_groups = df.groupby("ip").indices
+    for indices in ip_groups.values():
+        if len(indices) > 1:
+            idx_arr = indices[:30]
+            src_list.extend(idx_arr[:-1])
+            dst_list.extend(idx_arr[1:])
+            src_list.extend(idx_arr[1:])
+            dst_list.extend(idx_arr[:-1])
 
-    # Relation 2: Shared App & Channel (capped to prevent mega-cliques on top apps)
-    app_chan_groups = df.groupby(["app", "channel"]).groups
-    for _, indices in app_chan_groups.items():
-        idx_arr = list(indices)
-        if 1 < len(idx_arr) <= 30:
-            for i in range(len(idx_arr) - 1):
-                src_list.extend([idx_arr[i], idx_arr[i + 1]])
-                dst_list.extend([idx_arr[i + 1], idx_arr[i]])
+    # Relation 2: Shared App & Channel (detects campaign target clusters)
+    app_chan_groups = df.groupby(["app", "channel"]).indices
+    for indices in app_chan_groups.values():
+        if 1 < len(indices) <= 20:
+            idx_arr = indices[:20]
+            src_list.extend(idx_arr[:-1])
+            dst_list.extend(idx_arr[1:])
+            src_list.extend(idx_arr[1:])
+            dst_list.extend(idx_arr[:-1])
+
+    # Relation 3: Shared IP & Channel (detects cross-app spamming on same channel)
+    ip_chan_groups = df.groupby(["ip", "channel"]).indices
+    for indices in ip_chan_groups.values():
+        if 1 < len(indices) <= 20:
+            idx_arr = indices[:20]
+            src_list.extend(idx_arr[:-1])
+            dst_list.extend(idx_arr[1:])
+            src_list.extend(idx_arr[1:])
+            dst_list.extend(idx_arr[:-1])
+
+    # Relation 4: Shared Device Fingerprint (ip, device, os)
+    dev_fp_groups = df.groupby(["ip", "device", "os"]).indices
+    for indices in dev_fp_groups.values():
+        if 1 < len(indices) <= 20:
+            idx_arr = indices[:20]
+            src_list.extend(idx_arr[:-1])
+            dst_list.extend(idx_arr[1:])
+            src_list.extend(idx_arr[1:])
+            dst_list.extend(idx_arr[:-1])
 
     # Self-loops for all nodes
     node_ids = list(range(len(df)))
@@ -67,10 +94,18 @@ def build_pyg_graph(df: pd.DataFrame, train_ratio: float = 0.70, val_ratio: floa
     val_mask[train_cutoff:val_cutoff] = True
     test_mask[val_cutoff:] = True
 
-    return Data(x=x, edge_index=edge_index, y=y, train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+    return Data(
+        x=x.contiguous(),
+        x_cat=x_cat.contiguous(),
+        edge_index=edge_index.contiguous(),
+        y=y.contiguous(),
+        train_mask=train_mask.contiguous(),
+        val_mask=val_mask.contiguous(),
+        test_mask=test_mask.contiguous()
+    )
 
 
-def preprocess():
+def preprocess(input_path: str = None):
     raw_sample_path = "data/raw/train_sample.csv"
     raw_full_path = "data/raw/train.csv"
     output_dir = "data/processed"
@@ -79,19 +114,45 @@ def preprocess():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(prod_dir, exist_ok=True)
 
+    # 1. Resolve raw input file path
+    target_path = input_path or (sys.argv[1] if len(sys.argv) > 1 else None)
+    dtypes = {
+        "ip": "uint32",
+        "app": "uint16",
+        "device": "uint16",
+        "os": "uint16",
+        "channel": "uint16",
+        "is_attributed": "uint8"
+    }
+
+    n_rows_env = os.getenv("N_ROWS", "1000000")
+    nrows = None if n_rows_env in ["0", "all", "none", "None"] else int(n_rows_env)
+
     print("1. Loading raw ad-click dataset...")
-    if os.path.exists(raw_sample_path):
-        raw_path = raw_sample_path
-        print(f"   -> Loading sample dataset from: {raw_path}")
-        df = pd.read_csv(raw_path)
+    if target_path and os.path.exists(target_path):
+        raw_path = target_path
+        if "sample" in target_path or not nrows:
+            print(f"   -> Loading dataset from target path: {raw_path}")
+            df = pd.read_csv(raw_path, dtype=dtypes)
+        else:
+            print(f"   -> Loading dataset slice ({nrows:,} rows) from target path: {raw_path}")
+            df = pd.read_csv(raw_path, nrows=nrows, dtype=dtypes)
     elif os.path.exists(raw_full_path):
         raw_path = raw_full_path
-        print(f"   -> Loading full dataset from: {raw_path}")
-        df = pd.read_csv(raw_path, nrows=100000)
+        if nrows:
+            print(f"   -> Loading large dataset slice ({nrows:,} rows) from: {raw_path}")
+            df = pd.read_csv(raw_path, nrows=nrows, dtype=dtypes)
+        else:
+            print(f"   -> Loading FULL dataset from: {raw_path}")
+            df = pd.read_csv(raw_path, dtype=dtypes)
+    elif os.path.exists(raw_sample_path):
+        raw_path = raw_sample_path
+        print(f"   -> Loading sample dataset from: {raw_path}")
+        df = pd.read_csv(raw_path, dtype=dtypes)
     else:
         raise FileNotFoundError("No raw ad click CSV found in data/raw/.")
 
-    print(f"   -> Loaded {len(df):,} records.")
+    print(f"   -> Loaded {len(df):,} records successfully.")
 
     print("2. Validating raw click events with Pandera (RawAdClickSchema)...")
     RawAdClickSchema.validate(df)

@@ -337,12 +337,13 @@ def process_single_click(click: AdClickRequest) -> Dict[str, Any]:
     x_norm = (raw_feats - means) / (stds + 1e-6)
 
     x_tensor = torch.tensor(x_norm, dtype=torch.float).unsqueeze(0).to(device)
+    x_cat_tensor = torch.tensor([[click.app, click.channel, click.device, click.os, int(hour)]], dtype=torch.long).to(device)
     # Self-loop edge for single-node graph inference
     edge_index = torch.tensor([[0], [0]], dtype=torch.long).to(device)
 
     # 4. GraphNC Model Forward Pass
     with torch.no_grad():
-        raw_score = model(x_tensor, edge_index).item()
+        raw_score = model(x_tensor, edge_index, x_cat=x_cat_tensor).item()
 
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
