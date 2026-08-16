@@ -189,8 +189,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 1G
+          cpus: '1.5'
+          memory: 4G
 
   # ----------------------------------------------------------------------------
   # 4. Local AWS Web Management Dashboard (Floci UI)
