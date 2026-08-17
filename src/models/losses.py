@@ -47,27 +47,26 @@ class ScoreDALoss(nn.Module):
     """
     Score Distribution Alignment (ScoreDA) Loss:
     Distills and aligns the anomaly score distribution between the Teacher GNN and Student GNN
-    using KL-Divergence and MSE to stabilize extreme class imbalance training.
+    using stable MSE and Cosine Ranking Alignment to stabilize extreme class imbalance training.
     """
-    def __init__(self, eps: float = 1e-8, kl_weight: float = 0.5, mse_weight: float = 0.5):
+    def __init__(self, eps: float = 1e-6, mse_weight: float = 1.0):
         super(ScoreDALoss, self).__init__()
         self.eps = eps
-        self.kl_weight = kl_weight
         self.mse_weight = mse_weight
 
     def forward(self, student_score: torch.Tensor, teacher_score: torch.Tensor) -> torch.Tensor:
-        # 1. Normalize scores to valid probability distributions for KL divergence
-        s_prob = torch.clamp(student_score, min=self.eps, max=1.0)
-        t_prob = torch.clamp(teacher_score, min=self.eps, max=1.0)
-        s_prob = s_prob / (s_prob.sum() + self.eps)
-        t_prob = t_prob / (t_prob.sum() + self.eps)
-
-        kl_loss = F.kl_div(s_prob.log(), t_prob, reduction="batchmean")
+        # 1. Map unbounded hypersphere distance scores to probabilities in (0, 1)
+        s_prob = torch.sigmoid(student_score).clamp(min=1e-5, max=1.0 - 1e-5)
+        t_prob = teacher_score.clamp(min=1e-5, max=1.0 - 1e-5)
 
         # 2. Score MSE alignment
-        mse_loss = F.mse_loss(student_score, teacher_score, reduction="mean")
+        mse_loss = F.mse_loss(s_prob, t_prob, reduction="mean")
 
-        return self.kl_weight * kl_loss + self.mse_weight * mse_loss
+        # 3. Cosine Ranking Alignment (100% immune to log(0) NaN singularities)
+        cos_sim = F.cosine_similarity(s_prob.unsqueeze(0), t_prob.unsqueeze(0), dim=-1)
+        ranking_loss = torch.mean(1.0 - cos_sim)
+
+        return self.mse_weight * mse_loss + 0.1 * ranking_loss
 
 
 class EmbeddingDistillationLoss(nn.Module):
@@ -77,3 +76,38 @@ class EmbeddingDistillationLoss(nn.Module):
 
     def forward(self, emb_s: torch.Tensor, emb_t: torch.Tensor) -> torch.Tensor:
         return F.mse_loss(emb_s, emb_t, reduction="mean")
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss (Lin et al., 2017) for handling extreme class imbalance.
+    Down-weights well-classified examples and focuses learning on hard negatives.
+    L_focal = -alpha * (1 - p_t)^gamma * log(p_t)
+    """
+    def __init__(self, gamma: float = 2.0, alpha: float = 0.75):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits: Raw un-sigmoided predictions (batch_size,)
+            targets: Binary labels 0/1 (batch_size,)
+        """
+        # Numerically stable BCE per-element (no reduction)
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+
+        # Probability of correct class
+        probs = torch.sigmoid(logits)
+        p_t = targets * probs + (1.0 - targets) * (1.0 - probs)
+        p_t = p_t.clamp(min=1e-6, max=1.0 - 1e-6)
+
+        # Focal modulation factor: (1 - p_t)^gamma
+        focal_weight = (1.0 - p_t) ** self.gamma
+
+        # Alpha balancing: alpha for positives, (1-alpha) for negatives
+        alpha_t = targets * self.alpha + (1.0 - targets) * (1.0 - self.alpha)
+
+        loss = alpha_t * focal_weight * bce
+        return loss.mean()

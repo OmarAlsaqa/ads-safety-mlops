@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, GATv2Conv
 
 
 class GCNLayer(nn.Module):
@@ -15,6 +15,28 @@ class GCNLayer(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         out = self.conv(x, edge_index)
+        if self.act is not None:
+            out = self.act(out)
+        return out
+
+
+class GATv2Layer(nn.Module):
+    """
+    Graph Attention v2 Layer with multi-head attention and residual connections.
+    GATv2 uses dynamic attention that is strictly more expressive than GAT.
+    """
+    def __init__(self, in_ft: int, out_ft: int, heads: int = 4, act=nn.PReLU(), dropout: float = 0.1):
+        super(GATv2Layer, self).__init__()
+        assert out_ft % heads == 0, f"out_ft ({out_ft}) must be divisible by heads ({heads})"
+        self.conv = GATv2Conv(in_ft, out_ft // heads, heads=heads, dropout=dropout, concat=True)
+        self.norm = nn.LayerNorm(out_ft)
+        self.act = act
+        # Residual projection if dimensions don't match
+        self.residual = nn.Linear(in_ft, out_ft) if in_ft != out_ft else nn.Identity()
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        out = self.conv(x, edge_index)
+        out = self.norm(out + self.residual(x))  # Residual + LayerNorm
         if self.act is not None:
             out = self.act(out)
         return out

@@ -9,7 +9,8 @@ stages:
       - data/processed/train.parquet
       - data/processed/val.parquet
       - data/processed/test.parquet
-      - data/processed/ad_click_graph.pt
+      - data/processed/ad_click_graph.pt:
+          cache: false
       - data/simulated_production/production_drift_stream.csv
 
   train:

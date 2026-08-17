@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple
 
-from .layers import GCNLayer, AvgReadout, MaxReadout, MinReadout, WSReadout
-from .losses import NormRegLoss, ScoreDALoss, EmbeddingDistillationLoss
+from .layers import GCNLayer, GATv2Layer, AvgReadout, MaxReadout, MinReadout, WSReadout
+from .losses import NormRegLoss, ScoreDALoss, EmbeddingDistillationLoss, FocalLoss
 
 
 class CategoricalEntityEncoder(nn.Module):
@@ -45,21 +45,19 @@ class CategoricalEntityEncoder(nn.Module):
 
 class TeacherGGAD(nn.Module):
     """
-    Teacher GNN Model:
+    Teacher GNN Model (GATv2 Multi-Head Attention):
     Generates high-capacity structural embeddings and adversarial perturbation-resilient
-    anomaly representations across the graph.
+    anomaly representations across the graph using dynamic attention.
     """
     def __init__(self, in_dim: int, hidden_dim: int, readout: str = "avg", noise_var: float = 0.01):
         super(TeacherGGAD, self).__init__()
         self.encoder = CategoricalEntityEncoder(in_dim, hidden_dim)
-        self.gcn1 = GCNLayer(hidden_dim, hidden_dim, act=nn.PReLU())
-        self.gcn2 = GCNLayer(hidden_dim, hidden_dim, act=nn.PReLU())
-        self.gcn3 = GCNLayer(hidden_dim, hidden_dim, act=nn.PReLU())
+        self.gat1 = GATv2Layer(hidden_dim, hidden_dim, heads=4, act=nn.PReLU(), dropout=0.1)
+        self.gat2 = GATv2Layer(hidden_dim, hidden_dim, heads=4, act=nn.PReLU(), dropout=0.1)
 
         self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2, bias=False)
         self.fc2 = nn.Linear(hidden_dim // 2, hidden_dim // 4, bias=False)
         self.fc3 = nn.Linear(hidden_dim // 4, 1, bias=False)
-        self.fc_neigh = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
         self.act = nn.ReLU()
         self.noise_var = noise_var
@@ -73,10 +71,10 @@ class TeacherGGAD(nn.Module):
         else:
             self.read = AvgReadout()
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, x_cat: torch.Tensor = None, is_training: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, x_cat: torch.Tensor = None, is_training: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h0 = self.encoder(x, x_cat)
-        h1 = self.gcn1(h0, edge_index)
-        emb = self.gcn2(h1, edge_index) + h1  # Residual Connection
+        h1 = self.gat1(h0, edge_index)
+        emb = self.gat2(h1, edge_index)  # Residual is inside GATv2Layer
 
         # Inject controlled feature variance during training to simulate evasion attacks
         if is_training and self.noise_var > 0:
@@ -88,21 +86,22 @@ class TeacherGGAD(nn.Module):
         # Score projection
         f1 = self.act(self.fc1(emb_perturbed))
         f2 = self.act(self.fc2(f1))
-        scores = torch.sigmoid(self.fc3(f2)).squeeze(-1)
+        logits = self.fc3(f2).squeeze(-1)
+        scores = torch.sigmoid(logits)
 
-        return emb, scores
+        return emb, scores, logits
 
 
 class StudentOCGNN(nn.Module):
     """
-    Student GNN Model:
+    Student GNN Model (GATv2 Multi-Head Attention):
     Learns calibrated normality boundaries and distills representations from the Teacher.
     """
     def __init__(self, in_dim: int, hidden_dim: int, readout: str = "avg"):
         super(StudentOCGNN, self).__init__()
         self.encoder = CategoricalEntityEncoder(in_dim, hidden_dim)
-        self.gcn1 = GCNLayer(hidden_dim, hidden_dim, act=nn.PReLU())
-        self.gcn2 = GCNLayer(hidden_dim, hidden_dim, act=nn.PReLU())
+        self.gat1 = GATv2Layer(hidden_dim, hidden_dim, heads=4, act=nn.PReLU(), dropout=0.1)
+        self.gat2 = GATv2Layer(hidden_dim, hidden_dim, heads=4, act=nn.PReLU(), dropout=0.1)
 
         if readout == "max":
             self.read = MaxReadout()
@@ -115,8 +114,8 @@ class StudentOCGNN(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, x_cat: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         h0 = self.encoder(x, x_cat)
-        h1 = self.gcn1(h0, edge_index)
-        h2 = self.gcn2(h1, edge_index) + h1  # Residual Connection
+        h1 = self.gat1(h0, edge_index)
+        h2 = self.gat2(h1, edge_index)  # Residual is inside GATv2Layer
         return h1, h2
 
 
@@ -135,6 +134,8 @@ class GraphNC(nn.Module):
         distill_weight: float = 1.0,
         norm_reg_weight: float = 1.0,
         noise_var: float = 0.01,
+        focal_gamma: float = 2.0,
+        focal_alpha: float = 0.75,
     ):
         super(GraphNC, self).__init__()
         self.teacher = TeacherGGAD(in_dim, hidden_dim, readout=readout, noise_var=noise_var)
@@ -143,6 +144,7 @@ class GraphNC(nn.Module):
         self.norm_reg_loss = NormRegLoss(embedding_dim=hidden_dim, beta=beta)
         self.score_da_loss = ScoreDALoss()
         self.distill_loss = EmbeddingDistillationLoss()
+        self.focal_loss = FocalLoss(gamma=focal_gamma, alpha=focal_alpha)
 
         self.score_da_weight = score_da_weight
         self.distill_weight = distill_weight
@@ -151,7 +153,7 @@ class GraphNC(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, x_cat: torch.Tensor = None) -> torch.Tensor:
         """Inference mode: returns calibrated anomaly probabilities combining Teacher and Student representations."""
-        _, teacher_scores = self.teacher(x, edge_index, x_cat=x_cat, is_training=False)
+        _, teacher_scores, _ = self.teacher(x, edge_index, x_cat=x_cat, is_training=False)
         return teacher_scores
 
     def compute_loss(
@@ -168,7 +170,7 @@ class GraphNC(nn.Module):
         L_total = L_supervised + alpha * L_NormReg + beta * L_Distill + gamma * L_ScoreDA
         """
         # 1. Forward passes
-        teacher_emb, teacher_scores = self.teacher(x, edge_index, x_cat=x_cat, is_training=is_training)
+        teacher_emb, teacher_scores, teacher_logits = self.teacher(x, edge_index, x_cat=x_cat, is_training=is_training)
         _, student_emb = self.student(x, edge_index, x_cat=x_cat)
 
         # 2. Normality Regularization (NormReg) on Student embeddings
@@ -180,22 +182,14 @@ class GraphNC(nn.Module):
         # 4. Score Distribution Alignment (ScoreDA)
         score_da = self.score_da_loss(student_scores, teacher_scores)
 
-        # 5. Supervised Cross-Entropy Loss with Square-Root Imbalance Weighting
-        masked_y = y[mask].float()
-        masked_pred = teacher_scores[mask]
-        
-        # Square-root class weighting (sqrt(534) ≈ 23.1) balances high recall with high precision
-        pos_weight = torch.sqrt((1.0 - masked_y.mean()) / (masked_y.mean() + 1e-6))
-        weight_vec = torch.where(masked_y == 1, pos_weight, 1.0)
-        bce_loss = F.binary_cross_entropy(
-            masked_pred.clamp(min=1e-7, max=1.0 - 1e-7),
-            masked_y,
-            weight=weight_vec
-        )
+        # 5. Focal Loss (replaces BCE) — down-weights easy examples, focuses on hard fraud cases
+        masked_y = y[mask].float().clamp(0.0, 1.0)
+        masked_logits = teacher_logits[mask]
+        focal = self.focal_loss(masked_logits, masked_y)
 
         # 6. Total Combined Loss
         total_loss = (
-            bce_loss
+            focal
             + self.norm_reg_weight * norm_loss
             + self.distill_weight * distill_loss
             + self.score_da_weight * score_da
@@ -203,7 +197,7 @@ class GraphNC(nn.Module):
 
         loss_metrics = {
             "loss_total": total_loss.item(),
-            "loss_bce": bce_loss.item(),
+            "loss_bce": focal.item(),
             "loss_norm_reg": norm_loss.item(),
             "loss_distill": distill_loss.item(),
             "loss_score_da": score_da.item(),

@@ -1,5 +1,7 @@
 [core]
     remote = floci
+[cache]
+    type = copy
 ['remote "floci"']
     url = s3://mlops-data
     endpointurl = http://localhost:4566

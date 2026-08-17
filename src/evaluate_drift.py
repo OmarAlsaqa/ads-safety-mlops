@@ -28,23 +28,34 @@ def evaluate_drift():
     if not os.path.exists(prod_path):
         raise FileNotFoundError(f"Production stream dataset not found at {prod_path}. Run 'dvc repro' first.")
 
-    ref_df = pd.read_parquet(ref_path)
-    prod_df = pd.read_csv(prod_path)
-
     # Select behavioral, graph-derived and target features (excluding high-cardinality raw IDs like ip)
     eval_cols = [
         "hour", "day", "ip_click_count", "ip_unique_apps", "app_freq", "channel_freq", "device_freq",
         "next_click_delta", "prev_click_delta", "ip_device_os_cumcount", "ip_app_cumcount",
         "ip_hh_app_count", "ip_hh_device_count", "app_channel_count", "ip_unique_channels"
     ]
-    if "is_attributed" in ref_df.columns and "is_attributed" in prod_df.columns:
-        eval_cols.append("is_attributed")
 
-    ref_data = ref_df[eval_cols]
-    prod_data = prod_df[eval_cols]
+    # Load statistically representative sample (100,000 records) for sub-second drift analysis without OOM
+    sample_size = 100000
+    ref_df = pd.read_parquet(ref_path)
+    if "is_attributed" in ref_df.columns:
+        if "is_attributed" not in eval_cols:
+            eval_cols.append("is_attributed")
+    
+    if len(ref_df) > sample_size:
+        ref_data = ref_df[eval_cols].sample(n=sample_size, random_state=42)
+    else:
+        ref_data = ref_df[eval_cols]
 
-    print(f"Reference dataset (train.parquet): {len(ref_data):,} rows")
-    print(f"Current production dataset (production_drift_stream.csv): {len(prod_data):,} rows")
+    prod_df = pd.read_csv(prod_path, nrows=sample_size * 2)
+    avail_cols = [c for c in eval_cols if c in prod_df.columns]
+    if len(prod_df) > sample_size:
+        prod_data = prod_df[avail_cols].sample(n=sample_size, random_state=42)
+    else:
+        prod_data = prod_df[avail_cols]
+
+    print(f"Reference dataset sample: {len(ref_data):,} rows")
+    print(f"Production stream sample: {len(prod_data):,} rows")
 
     # --------------------------------------------------------------------------
     # 1. Modern Evidently 0.7+ Report for Workspace UI Sync

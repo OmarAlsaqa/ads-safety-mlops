@@ -105,8 +105,9 @@ def train():
         mlflow.set_experiment(experiment_name)
         print(f"   -> Connected to MLflow at: {mlflow_tracking_uri}")
     except Exception as e:
-        print(f"   -> Notice: MLflow server offline ({e}). Logging locally to ./mlruns")
-        mlflow.set_tracking_uri("file:./mlruns")
+        print(f"   -> Notice: MLflow server offline ({e}). Logging locally to sqlite:///mlflow.db")
+        os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
+        mlflow.set_tracking_uri("sqlite:///mlflow.db")
         mlflow.set_experiment(experiment_name)
 
     # 2. Load Processed Graph Data
@@ -116,11 +117,11 @@ def train():
 
     print(f"1. Loading Graph Dataset from {graph_path}...")
     data = torch.load(graph_path, weights_only=False)
-    data.x = data.x.contiguous()
+    data.x = torch.nan_to_num(data.x.contiguous(), nan=0.0, posinf=0.0, neginf=0.0)
     if hasattr(data, "x_cat") and data.x_cat is not None:
-        data.x_cat = data.x_cat.contiguous()
+        data.x_cat = torch.nan_to_num(data.x_cat.contiguous(), nan=0)
     data.edge_index = data.edge_index.contiguous()
-    data.y = data.y.contiguous()
+    data.y = torch.nan_to_num(data.y.contiguous(), nan=0)
     data.train_mask = data.train_mask.contiguous()
     data.val_mask = data.val_mask.contiguous()
     data.test_mask = data.test_mask.contiguous()
@@ -133,13 +134,13 @@ def train():
     print(f"   -> Nodes: {num_nodes:,} | Edges: {num_edges:,} | Features: {in_dim}")
     print(f"   -> Class Imbalance: Positive Fraud Rate = {pos_ratio * 100:.3f}%")
 
-    # 3. Setup Adaptive Execution Strategy
-    use_minibatch = num_nodes > 2000000
+    # 3. Setup Adaptive Execution Strategy (Optimized Mini-Batch for bounded VRAM)
+    use_minibatch = num_nodes > 500000
     if use_minibatch:
-        batch_size = 65536
+        batch_size = 8192
         train_loader = NeighborLoader(
             data,
-            num_neighbors=[15, 10],
+            num_neighbors=[8, 4],
             batch_size=batch_size,
             input_nodes=data.train_mask,
             shuffle=True,
@@ -147,7 +148,7 @@ def train():
         )
         val_loader = NeighborLoader(
             data,
-            num_neighbors=[15, 10],
+            num_neighbors=[8, 4],
             batch_size=batch_size,
             input_nodes=data.val_mask,
             shuffle=False,
@@ -155,31 +156,36 @@ def train():
         )
         test_loader = NeighborLoader(
             data,
-            num_neighbors=[15, 10],
+            num_neighbors=[8, 4],
             batch_size=batch_size,
             input_nodes=data.test_mask,
             shuffle=False,
             num_workers=0,
         )
     else:
+        train_loader = None
+        val_loader = None
+        test_loader = None
         # Fast full-graph GPU execution (<1.5GB VRAM for 1M nodes)
         data = data.to(device)
 
     # 4. Hyperparameters
     hyperparams = {
-        "model_architecture": "GraphNC (ICML 2026)",
+        "model_architecture": "GraphNC-GATv2 (ICML 2026)",
         "in_dim": in_dim,
-        "hidden_dim": 64,
+        "hidden_dim": 128,
         "readout": "avg",
-        "lr": 0.0015,
-        "weight_decay": 1e-4,
+        "lr": 0.001,
+        "weight_decay": 5e-5,
         "epochs": 35,
-        "early_stopping_patience": 12,
+        "early_stopping_patience": 10,
         "beta": 0.5,
         "score_da_weight": 0.05,
         "distill_weight": 0.05,
         "norm_reg_weight": 0.01,
         "noise_var": 0.01,
+        "focal_gamma": 2.0,
+        "focal_alpha": 0.75,
         "use_minibatch": use_minibatch,
         "batch_nodes": num_nodes,
         "total_edges": num_edges,
@@ -195,6 +201,8 @@ def train():
         distill_weight=hyperparams["distill_weight"],
         norm_reg_weight=hyperparams["norm_reg_weight"],
         noise_var=hyperparams["noise_var"],
+        focal_gamma=hyperparams["focal_gamma"],
+        focal_alpha=hyperparams["focal_alpha"],
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -212,6 +220,9 @@ def train():
     best_model_state = None
     model_name = "GraphNC-AdFraud-Detector"
     os.makedirs("models", exist_ok=True)
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     print(f"\n2. Starting MLflow Run & GraphNC Training (Strategy: {'Mini-Batch' if use_minibatch else 'Fast Full-Graph GPU'})...")
     with mlflow.start_run(run_name="graphnc_production_training") as run:
@@ -231,17 +242,23 @@ def train():
                     target_mask = torch.zeros(batch.x.size(0), dtype=torch.bool, device=device)
                     target_mask[:batch.batch_size] = True
                     batch_x_cat = getattr(batch, "x_cat", None)
-                    loss, loss_dict = model.compute_loss(
-                        batch.x,
-                        batch.edge_index,
-                        batch.y,
-                        target_mask,
-                        x_cat=batch_x_cat,
-                        is_training=True,
-                    )
-                    loss.backward()
+                    
+                    with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
+                        loss, loss_dict = model.compute_loss(
+                            batch.x,
+                            batch.edge_index,
+                            batch.y,
+                            target_mask,
+                            x_cat=batch_x_cat,
+                            is_training=True,
+                        )
+
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
+
                     total_loss += loss_dict["loss_total"]
                     total_bce += loss_dict["loss_bce"]
                     num_batches += 1
@@ -249,17 +266,20 @@ def train():
                 avg_bce = total_bce / max(1, num_batches)
             else:
                 data_x_cat = getattr(data, "x_cat", None)
-                loss, loss_dict = model.compute_loss(
-                    data.x,
-                    data.edge_index,
-                    data.y,
-                    data.train_mask,
-                    x_cat=data_x_cat,
-                    is_training=True,
-                )
-                loss.backward()
+                with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
+                    loss, loss_dict = model.compute_loss(
+                        data.x,
+                        data.edge_index,
+                        data.y,
+                        data.train_mask,
+                        x_cat=data_x_cat,
+                        is_training=True,
+                    )
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 avg_loss = loss_dict["loss_total"]
                 avg_bce = loss_dict["loss_bce"]
 
@@ -267,7 +287,7 @@ def train():
 
             # --- Validation Step ---
             model.eval()
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
                 if use_minibatch:
                     val_preds = []
                     val_targets = []
@@ -284,6 +304,8 @@ def train():
                     val_probs = model(data.x, data.edge_index, x_cat=data_x_cat)[data.val_mask].cpu().numpy()
                     val_y = data.y[data.val_mask].cpu().numpy()
 
+                val_probs = np.nan_to_num(val_probs, nan=0.0)
+                val_y = np.nan_to_num(val_y, nan=0.0)
                 val_auc = float(roc_auc_score(val_y, val_probs))
                 val_pr_auc = float(average_precision_score(val_y, val_probs))
 
@@ -324,7 +346,7 @@ def train():
         model.load_state_dict({k: v.to(device) for k, v in best_model_state.items()})
         model.eval()
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
             if use_minibatch:
                 val_preds = []
                 val_targets = []
@@ -341,15 +363,35 @@ def train():
                 val_probs = model(data.x, data.edge_index, x_cat=data_x_cat)[data.val_mask].cpu().numpy()
                 val_y = data.y[data.val_mask].cpu().numpy()
 
-            # Find optimal threshold that maximizes Validation F1 Score
+            # Pareto Threshold Tuning: Find threshold maximizing F1 with ≥80% Precision & ≥80% Recall target
             best_thresh = 0.5
             best_val_f1 = 0.0
-            for t in np.linspace(val_probs.min() + 1e-4, val_probs.max() - 1e-4, 150):
+            pareto_thresh = None  # Threshold meeting both P≥0.80 and R≥0.80
+            pareto_f1 = 0.0
+
+            for t in np.linspace(max(val_probs.min() + 1e-4, 0.01), min(val_probs.max() - 1e-4, 0.99), 300):
                 preds = (val_probs >= t).astype(int)
                 f1 = f1_score(val_y, preds, zero_division=0)
+                prec = precision_score(val_y, preds, zero_division=0)
+                rec = recall_score(val_y, preds, zero_division=0)
+
+                # Track best overall F1
                 if f1 > best_val_f1:
                     best_val_f1 = f1
                     best_thresh = float(t)
+
+                # Track Pareto-optimal: both P≥0.80 and R≥0.80
+                if prec >= 0.80 and rec >= 0.80 and f1 > pareto_f1:
+                    pareto_f1 = f1
+                    pareto_thresh = float(t)
+
+            # Prefer Pareto threshold if found, otherwise fall back to best F1 threshold
+            if pareto_thresh is not None:
+                best_thresh = pareto_thresh
+                best_val_f1 = pareto_f1
+                print(f"   ✅ Pareto threshold found: {best_thresh:.4f} (F1={pareto_f1:.4f}, P≥80%, R≥80%)")
+            else:
+                print(f"   ⚠️ No Pareto threshold with P≥80% & R≥80% found. Using best F1 threshold: {best_thresh:.4f} (F1={best_val_f1:.4f})")
 
             # Apply tuned threshold on independent Held-out Test Set
             if use_minibatch:
@@ -368,6 +410,8 @@ def train():
                 test_probs = model(data.x, data.edge_index, x_cat=data_x_cat)[data.test_mask].cpu().numpy()
                 test_y = data.y[data.test_mask].cpu().numpy()
 
+            test_probs = np.nan_to_num(test_probs, nan=0.0)
+            test_y = np.nan_to_num(test_y, nan=0.0)
             test_auc = float(roc_auc_score(test_y, test_probs))
             test_pr_auc = float(average_precision_score(test_y, test_probs))
             test_preds = (test_probs >= best_thresh).astype(int)
