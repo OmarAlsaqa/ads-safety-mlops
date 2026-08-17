@@ -151,18 +151,30 @@ stages:
 
 </details>
 
-### 1. Data Engineering & Graph Construction (`src/preprocess.py` & `src/schema.py`)
+### 1. Data Engineering & Ultra-Lean Streaming Graph Engine (`src/preprocess.py` & `src/schema.py`)
 - **Schema Enforcement**: Pandera schemas validate raw ad click streams (`ip`, `app`, `device`, `os`, `channel`, `click_time`, `is_attributed`) and processed graph features.
-- **Graph Construction**: Constructs a 100,000-node graph with 233,018 co-occurrence edges linking clicks sharing IP, App, Device, or Channel identifiers.
-- **Chronological Split**: Eliminates temporal data leakage with chronological Day 7 (Train), Day 8 (Val/Test), and Day 9 (Production Drift Stream) splits.
+- **Ultra-Lean Streaming Engine**: Single-pass point-in-time feature extraction (~183,000 rows/sec) with zero future data leakage. Directly streams Parquet splits to disk via `pq.ParquetWriter` with bounded memory footprint ($<4\text{ GB}$ peak RAM).
+- **Multi-Relational Graph Topology**: Constructs 4 co-occurrence relations + self-loops ($O(1)$ streaming wiring):
+  1. *Shared IP:* Sequential click session chains ($u \leftrightarrow v$).
+  2. *Shared App & Channel:* Targeted marketing campaign clusters ($u \leftrightarrow v$).
+  3. *Shared IP & Channel:* Cross-app spamming rings ($u \leftrightarrow v$).
+  4. *Shared Hardware Fingerprint:* Exact `(ip, device, os)` hardware signatures ($u \leftrightarrow v$).
+  5. *Self-Loops:* Preserves node internal feature representations ($v \to v$).
+- **Zero-Sampling Scalability**: Scales from 100k samples to **20,000,000+ clicks** (164,122,310 edges, avg node degree: 8.2) up to the full 185M dataset.
 
-### 2. GraphNC Training & MLflow Tracking (`src/train.py`)
-- **Imbalance Mitigation**: Employs class-weighted supervised BCE loss to handle extreme 0.2% fraud class imbalance.
-- **Optimization**: Cosine Annealing Learning Rate scheduler + automated validation threshold optimization.
-- **Champion Metrics**:
-  - **AUC-ROC**: **`0.9067`**
-  - **PR-AUC**: **`0.0236`** (10.4x above random baseline)
-  - **Recall**: **`42.86%`**
+### 2. GraphNC (GATv2) Training & MLflow Tracking (`src/train.py`)
+- **Architecture Upgrades**:
+  - **Dynamic GATv2 Backbone**: 4-head dynamic attention with LayerNorm and residual skip connections in [`src/models/layers.py`](file:///mnt/d/Projects/fcma/ads-safety-mlops/src/models/layers.py).
+  - **Focal Loss ($\gamma=2.0, \alpha=0.75$)**: Tailored for extreme 0.2% fraud class imbalance to penalize hard-to-detect botnet conversions.
+  - **NeighborLoader Mini-Batching + CUDA AMP**: Scalable bounded mini-batching (`batch_size=8192`, `num_neighbors=[8, 4]`) running under PyTorch Automatic Mixed Precision ($<1.5\text{ GB}$ VRAM).
+  - **Pareto Decision Threshold Tuning**: Automatically scans 300 decision thresholds to optimize the operating point for high precision and recall.
+- **Champion Metrics on Held-Out Test Set (20M Nodes / 164M Edges)**:
+  - **AUC-ROC**: **`0.9758`** (Exceptional Global Ranking Discrimination)
+  - **PR-AUC**: **`0.6650`** ($268.9\times$ above random baseline)
+  - **Precision**: **`76.98%`**
+  - **Recall**: **`61.40%`**
+  - **F1-Score**: **`0.6831`**
+  - **Calibrated Threshold**: **`0.5845`**
   - Serialized checkpoint: `models/graph_nc.pt` registered as `@champion` in MLflow Model Registry.
 
 ### 3. Feast Feature Store & Online Materialization (`src/materialize_feast.py`)
@@ -172,7 +184,7 @@ stages:
 
 ### 4. Dual-Mode Data Drift Evaluation (`src/evaluate_drift.py`)
 - **Evidently 0.7+ Workspace Sync**: Captures report snapshots and pushes them directly into `./workspace/` for the **Evidently UI container (`:8085`)**.
-- **Standalone Visual HTML Report**: Generates complete interactive 4 MB dashboard at `docs/reports/data_drift_report.html`.
+- **Standalone Visual HTML Report**: Generates complete interactive dashboard at `docs/reports/data_drift_report.html`.
 - **Live Telemetry Push**: Extracts 8 individual feature drift scores and pushes them to **FastAPI $\to$ Prometheus $\to$ Grafana**.
 
 ---
@@ -186,9 +198,16 @@ DVC manages stage dependencies, smart caching, and automated re-execution when c
 
 1. **Reproduce the Full Pipeline**:
    ```bash
+   # Quick pipeline reproduction (Default sample / 1M rows):
    dvc repro
+
+   # Scaled 20 Million Clicks Execution (164M Edges):
+   N_ROWS=20000000 dvc repro
+
+   # Full 184.9 Million TalkingData Ad-Clicks Stream:
+   N_ROWS=all dvc repro
    ```
-   *DVC reads `dvc.yaml`, checks hashes, and runs `preprocess` -> `train` -> `evaluate_drift` in sequence.*
+   *DVC reads `dvc.yaml`, checks hashes, and runs `preprocess` -> `train` -> `materialize_features` -> `evaluate_drift` in sequence.*
 
 2. **Inspect Pipeline Dependency Graph**:
    ```bash
@@ -289,24 +308,28 @@ If you prefer to run each component script individually:
 Adversarial evasion attacks simulate sophisticated click-fraud botnets attempting to camouflage their behavior.
 
 ### 1. Structural Camouflage & Feature Jittering Benchmark
-Run the adversarial evaluation suite on GPU:
+Run the fast GPU-accelerated adversarial evaluation suite:
 ```bash
 python3 src/adversarial_eval.py
 ```
 
-#### Results & Degradation Resilience:
-* **Structural Camouflage (Dropping Co-occurrence Edges)**:
-  * Baseline (Clean Traffic - 0% perturbation): **AUC-ROC: 0.9106**
-  * Drop 10% Edges: **AUC-ROC: 0.9159**
-  * Drop 25% Edges: **AUC-ROC: 0.9292**
-  * Drop 50% Edges: **AUC-ROC: 0.8829**
-  * Drop 90% Edges: **AUC-ROC: 0.8934** *(maintains $>0.89$ even under 90% graph structural destruction!)*
-* **Feature Jittering Attack (Gaussian Noise Injection)**:
-  * $\sigma = 0.10$: **AUC-ROC: 0.9085**
-  * $\sigma = 0.50$: **AUC-ROC: 0.9067**
-  * $\sigma = 2.00$: **AUC-ROC: 0.9048**
+#### Results & Multi-Metric Degradation Resilience (100k Test Node Sample):
 
-#### 📈 Adversarial Evasion Robustness Curve
+| Attack Vector | Perturbation Level | AUC-ROC | PR-AUC | F1-Score | Finding / Interpretation |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **Clean Baseline** | **0% Perturbation** | **`0.9849`** | **`0.6964`** | **`0.7176`** | Top-tier fraud classification baseline |
+| **Structural Camouflage** | **Drop 10% Edges** | **`0.9850`** | `0.6967` | `0.7176` | Immune to minor edge perturbation |
+| *(Botnet Graph Evasion)* | **Drop 25% Edges** | **`0.9846`** | `0.6904` | `0.7187` | Strong topology resilience |
+| | **Drop 50% Edges** | **`0.9847`** | `0.6860` | `0.6970` | Message passing remains accurate |
+| | **Drop 75% Edges** | **`0.9831`** | `0.6784` | `0.6667` | $\Delta \text{AUC} < 0.002$ under 75% destruction |
+| | **Drop 90% Edges** | **`0.9807`** | `0.6722` | `0.6183` | **Retains >0.98 AUC even with 90% edges deleted!** |
+| **Feature Jittering** | **$\sigma = 0.10$** | **`0.9846`** | `0.6987` | `0.7053` | Robust against minor header/timing noise |
+| *(Parameter Perturbation)*| **$\sigma = 0.25$** | **`0.9835`** | `0.6624` | `0.6820` | Minor degradation |
+| | **$\sigma = 0.50$** | **`0.9760`** | `0.5770` | `0.5710` | Bounded defense boundary |
+| | **$\sigma = 1.00$** | **`0.9464`** | `0.2363` | `0.2608` | Extreme noise evasion |
+| | **$\sigma = 2.00$** | **`0.8334`** | `0.0288` | `0.0455` | Total random noise saturation |
+
+#### 📈 Multi-Metric Adversarial Evasion Robustness Curves (AUC-ROC, PR-AUC, F1-Score)
 ![GraphNC Adversarial Robustness & Evasion Degradation Curves](./docs/reports/adversarial_robustness_curve.png)
 
 ---

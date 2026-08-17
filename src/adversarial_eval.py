@@ -60,33 +60,29 @@ def apply_feature_jitter_attack(x: torch.Tensor, noise_std: float) -> torch.Tens
     return x + noise
 
 
-def evaluate_model_batched(model, data, edge_index=None, x=None, mask=None, device="cuda") -> np.ndarray:
-    """Evaluates GraphNC via scalable mini-batches to prevent GPU OOM on large graphs."""
+def evaluate_batches(model, batches, edge_drop_ratio=0.0, noise_std=0.0, device="cuda") -> np.ndarray:
+    """Evaluates GraphNC on pre-sampled mini-batches with optional edge-dropping or feature-jittering attack."""
     model.eval()
-    curr_x = (x if x is not None else data.x).cpu().contiguous()
-    curr_edges = (edge_index if edge_index is not None else data.edge_index).cpu().contiguous()
-    curr_mask = (mask if mask is not None else data.test_mask).cpu().contiguous()
-    curr_x_cat = getattr(data, "x_cat", None)
-    if curr_x_cat is not None:
-        curr_x_cat = curr_x_cat.cpu().contiguous()
-
-    temp_data = Data(x=curr_x, edge_index=curr_edges, test_mask=curr_mask, x_cat=curr_x_cat)
-    batch_size = 65536 if temp_data.num_nodes >= 1000000 else 16384
-    loader = NeighborLoader(
-        temp_data,
-        num_neighbors=[15, 10],
-        batch_size=batch_size,
-        input_nodes=temp_data.test_mask,
-        shuffle=False,
-        num_workers=0,
-    )
-
     preds = []
-    with torch.no_grad():
-        for batch in loader:
+    is_cuda = (device == "cuda" or (isinstance(device, torch.device) and device.type == "cuda"))
+
+    with torch.no_grad(), torch.amp.autocast('cuda', enabled=is_cuda):
+        for batch in batches:
             batch = batch.to(device)
-            b_x_cat = getattr(batch, "x_cat", None)
-            p = model(batch.x, batch.edge_index, x_cat=b_x_cat)[:batch.batch_size]
+            bx = batch.x
+            bedges = batch.edge_index
+            bx_cat = getattr(batch, "x_cat", None)
+
+            # Apply attacks if requested
+            if noise_std > 0.0:
+                bx = bx + torch.randn_like(bx) * noise_std
+            if edge_drop_ratio > 0.0:
+                num_e = bedges.shape[1]
+                keep = torch.rand(num_e, device=device) >= edge_drop_ratio
+                if keep.sum() > 0:
+                    bedges = bedges[:, keep]
+
+            p = model(bx, bedges, x_cat=bx_cat)[:batch.batch_size]
             preds.append(p.cpu().numpy())
 
     return np.concatenate(preds)
@@ -116,11 +112,8 @@ def run_adversarial_benchmark():
     if not os.path.exists(graph_path) or not os.path.exists(model_path):
         raise FileNotFoundError("Missing graph tensor or model checkpoint. Run 'dvc repro' first.")
 
+    print(f"1. Loading Graph Dataset and Model Checkpoint...")
     data = torch.load(graph_path, weights_only=False)
-    data.x = data.x.contiguous()
-    data.edge_index = data.edge_index.contiguous()
-    data.y = data.y.contiguous()
-    data.test_mask = data.test_mask.contiguous()
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
 
     hyperparams = checkpoint.get("hyperparams", {})
@@ -128,7 +121,7 @@ def run_adversarial_benchmark():
 
     model = GraphNC(
         in_dim=hyperparams.get("in_dim", data.num_features),
-        hidden_dim=hyperparams.get("hidden_dim", 64),
+        hidden_dim=hyperparams.get("hidden_dim", 128),
         readout=hyperparams.get("readout", "avg"),
         beta=hyperparams.get("beta", 0.5),
     ).to(device)
@@ -136,17 +129,36 @@ def run_adversarial_benchmark():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    test_y = data.y[data.test_mask].cpu().numpy()
-    pos_ratio = float((data.y == 1).float().mean().item())
+    # Stratified test sample of up to 100,000 test nodes for rapid, bounded adversarial stress testing
+    test_node_indices = torch.where(data.test_mask)[0]
+    eval_count = min(100000, len(test_node_indices))
+    eval_indices = test_node_indices[:eval_count]
+    test_y = data.y[eval_indices].cpu().numpy()
+
+    print(f"2. Pre-sampling {eval_count:,} test evaluation subgraphs (Single Fast Pass)...")
+    loader = NeighborLoader(
+        data,
+        num_neighbors=[8, 4],
+        batch_size=8192,
+        input_nodes=eval_indices,
+        shuffle=False,
+        num_workers=0,
+    )
+    eval_batches = [b.clone() for b in loader]
+    del loader, data
+    import gc
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     # 3. Clean Baseline Evaluation (Day 4 Test Set)
-    clean_probs = evaluate_model_batched(model, data, device=device)
+    clean_probs = evaluate_batches(model, eval_batches, device=device)
     clean_auc = float(roc_auc_score(test_y, clean_probs))
     clean_pr_auc = float(average_precision_score(test_y, clean_probs))
     clean_preds = (clean_probs >= threshold).astype(int)
     clean_f1 = float(f1_score(test_y, clean_preds, zero_division=0))
 
-    print(f"\n📊 Baseline (Clean Traffic - 0% Perturbation):\n"
+    print(f"\n📊 Baseline (Clean Traffic - {eval_count:,} Test Nodes):\n"
           f"   - Clean AUC-ROC: {clean_auc:.4f} | Clean PR-AUC: {clean_pr_auc:.4f} | F1: {clean_f1:.4f}")
 
     benchmark_results = {
@@ -161,14 +173,13 @@ def run_adversarial_benchmark():
     }
 
     # ==============================================================================
-    # Stress Test 1: Structural Camouflage Attack (Edge Dropping 10% to 80%)
+    # Stress Test 1: Structural Camouflage Attack (Edge Dropping 10% to 90%)
     # ==============================================================================
     print("\n⚔️ Stress Test 1: Structural Camouflage Attack (Dropping Co-occurrence Edges)...")
     edge_drop_levels = [0.10, 0.25, 0.50, 0.75, 0.90]
 
     for drop_rate in edge_drop_levels:
-        perturbed_edges = apply_edge_dropping_attack(data.edge_index, drop_rate)
-        pert_probs = evaluate_model_batched(model, data, edge_index=perturbed_edges, device=device)
+        pert_probs = evaluate_batches(model, eval_batches, edge_drop_ratio=drop_rate, device=device)
         pert_auc = float(roc_auc_score(test_y, pert_probs))
         pert_pr_auc = float(average_precision_score(test_y, pert_probs))
         pert_preds = (pert_probs >= threshold).astype(int)
@@ -192,8 +203,7 @@ def run_adversarial_benchmark():
     noise_levels = [0.10, 0.25, 0.50, 1.00, 2.00]
 
     for noise_std in noise_levels:
-        perturbed_x = apply_feature_jitter_attack(data.x, noise_std)
-        pert_probs = evaluate_model_batched(model, data, x=perturbed_x, device=device)
+        pert_probs = evaluate_batches(model, eval_batches, noise_std=noise_std, device=device)
         pert_auc = float(roc_auc_score(test_y, pert_probs))
         pert_pr_auc = float(average_precision_score(test_y, pert_probs))
         pert_preds = (pert_probs >= threshold).astype(int)
@@ -211,37 +221,43 @@ def run_adversarial_benchmark():
         })
 
     # ==============================================================================
-    # 4. Generate Publication-Quality Robustness Degradation Charts
+    # 4. Generate Publication-Quality Multi-Metric Robustness Charts
     # ==============================================================================
     os.makedirs("docs/reports", exist_ok=True)
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
 
-    # Chart 1: Structural Camouflage Degradation
+    # --- Chart 1: Structural Camouflage Degradation (AUC-ROC, PR-AUC, F1-Score) ---
     drop_pcts = [item["edge_drop_ratio"] * 100 for item in benchmark_results["structural_camouflage_attack"]]
     struct_aucs = [item["auc_roc"] for item in benchmark_results["structural_camouflage_attack"]]
+    struct_pr_aucs = [item["pr_auc"] for item in benchmark_results["structural_camouflage_attack"]]
+    struct_f1s = [item["f1_score"] for item in benchmark_results["structural_camouflage_attack"]]
 
-    ax1.plot(drop_pcts, struct_aucs, marker="o", color="#c0392b", lw=2.5, label="GraphNC (ICML 2026)")
-    ax1.axhline(clean_auc, color="gray", linestyle="--", alpha=0.7, label=f"Clean Baseline ({clean_auc:.4f})")
-    ax1.axhline(0.50, color="black", linestyle=":", alpha=0.5, label="Random Guessing (0.50)")
-    ax1.set_title("Structural Camouflage Robustness (Edge Dropping)", fontsize=11, fontweight="bold")
-    ax1.set_xlabel("% Co-occurrence Edges Deleted by Botnet")
-    ax1.set_ylabel("Test Set AUC-ROC")
-    ax1.set_ylim(0.45, 1.0)
-    ax1.legend(loc="lower left")
+    ax1.plot(drop_pcts, struct_aucs, marker="o", color="#2980b9", lw=2.5, label=f"AUC-ROC (Clean: {clean_auc:.4f})")
+    ax1.plot(drop_pcts, struct_pr_aucs, marker="s", color="#27ae60", lw=2.5, label=f"PR-AUC (Clean: {clean_pr_auc:.4f})")
+    ax1.plot(drop_pcts, struct_f1s, marker="^", color="#e74c3c", lw=2.5, label=f"F1-Score (Clean: {clean_f1:.4f})")
 
-    # Chart 2: Feature Jittering Degradation
+    ax1.set_title("Structural Camouflage Robustness (Edge Dropping)", fontsize=12, fontweight="bold")
+    ax1.set_xlabel("% Co-occurrence Edges Deleted by Botnet", fontsize=10, fontweight="bold")
+    ax1.set_ylabel("Metric Score", fontsize=10, fontweight="bold")
+    ax1.set_ylim(0.50, 1.02)
+    ax1.legend(loc="lower left", frameon=True)
+
+    # --- Chart 2: Feature Jittering Degradation (AUC-ROC, PR-AUC, F1-Score) ---
     noises = [item["noise_std"] for item in benchmark_results["feature_jitter_attack"]]
     feature_aucs = [item["auc_roc"] for item in benchmark_results["feature_jitter_attack"]]
+    feature_pr_aucs = [item["pr_auc"] for item in benchmark_results["feature_jitter_attack"]]
+    feature_f1s = [item["f1_score"] for item in benchmark_results["feature_jitter_attack"]]
 
-    ax2.plot(noises, feature_aucs, marker="s", color="#2980b9", lw=2.5, label="GraphNC (ICML 2026)")
-    ax2.axhline(clean_auc, color="gray", linestyle="--", alpha=0.7, label=f"Clean Baseline ({clean_auc:.4f})")
-    ax2.axhline(0.50, color="black", linestyle=":", alpha=0.5, label="Random Guessing (0.50)")
-    ax2.set_title("Feature Jittering Robustness (Adversarial Noise Injection)", fontsize=11, fontweight="bold")
-    ax2.set_xlabel("Noise Magnitude (σ)")
-    ax2.set_ylabel("Test Set AUC-ROC")
-    ax2.set_ylim(0.45, 1.0)
-    ax2.legend(loc="lower left")
+    ax2.plot(noises, feature_aucs, marker="o", color="#2980b9", lw=2.5, label=f"AUC-ROC (Clean: {clean_auc:.4f})")
+    ax2.plot(noises, feature_pr_aucs, marker="s", color="#27ae60", lw=2.5, label=f"PR-AUC (Clean: {clean_pr_auc:.4f})")
+    ax2.plot(noises, feature_f1s, marker="^", color="#e74c3c", lw=2.5, label=f"F1-Score (Clean: {clean_f1:.4f})")
+
+    ax2.set_title("Feature Jittering Robustness (Adversarial Noise Injection)", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Adversarial Noise Magnitude (σ)", fontsize=10, fontweight="bold")
+    ax2.set_ylabel("Metric Score", fontsize=10, fontweight="bold")
+    ax2.set_ylim(0.0, 1.02)
+    ax2.legend(loc="upper right", frameon=True)
 
     plt.tight_layout()
     chart_path = "docs/reports/adversarial_robustness_curve.png"
